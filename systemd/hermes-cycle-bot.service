@@ -1,0 +1,16 @@
+[Unit]
+Description=Cairn Hermes Telegram Cycle Bridge
+After=default.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/pi/PEV-scaffold
+EnvironmentFile=/home/pi/PEV-scaffold/config/hermes.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /home/pi/PEV-scaffold/scripts/hermes-cycle-bot.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

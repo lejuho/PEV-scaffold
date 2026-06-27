@@ -1,0 +1,15 @@
+[Unit]
+Description=PEV tmux sessions for Claude and Codex
+After=default.target network-online.target
+Wants=network-online.target
+Before=claude-auto-responder.service hermes-cycle-bot.service pev-dashboard.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/pi/PEV-scaffold
+EnvironmentFile=-/home/pi/PEV-scaffold/config/hermes.env
+ExecStart=/home/pi/PEV-scaffold/scripts/ensure-pev-tmux.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=default.target

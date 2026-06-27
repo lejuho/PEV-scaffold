@@ -1,0 +1,14 @@
+[Unit]
+Description=PEV Dashboard - Planner Executor Verifier cycle control
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/pi/PEV-scaffold/dashboard
+EnvironmentFile=-/home/pi/PEV-scaffold/config/hermes.env
+ExecStart=/usr/bin/python3 /home/pi/PEV-scaffold/dashboard/server.py
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

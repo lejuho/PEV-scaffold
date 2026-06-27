@@ -1,0 +1,20 @@
+[Unit]
+Description=Claude Auto Responder - tmux prompt auto-confirm + idle Telegram notify
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=/home/pi/PEV-scaffold
+EnvironmentFile=-/home/pi/PEV-scaffold/config/hermes.env
+ExecStart=/usr/bin/python3 /home/pi/PEV-scaffold/scripts/claude-auto-responder.py
+Restart=always
+RestartSec=5
+KillMode=mixed
+KillSignal=SIGINT
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

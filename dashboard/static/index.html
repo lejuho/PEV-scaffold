@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PEV Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Planner · Executor · Verifier</p>
+        <h1>PEV Dashboard</h1>
+      </div>
+      <div class="top-actions">
+        <button id="refresh">Refresh</button>
+        <label class="toggle"><input id="showArchived" type="checkbox" /> Show archived/hidden</label>
+      </div>
+    </header>
+
+    <main>
+      <section id="projects" class="projects"></section>
+      <section class="panel">
+        <h2>Console</h2>
+        <form id="sendForm" class="send-form">
+          <select id="sendProject" aria-label="Project"></select>
+          <select id="sendTarget" aria-label="Target">
+            <option value="claude">Claude</option>
+            <option value="codex">Codex</option>
+          </select>
+          <input id="sendMessage" type="text" placeholder="Message to send via /say" autocomplete="off" />
+          <button type="submit">Send</button>
+        </form>
+        <pre id="console">Ready.</pre>
+      </section>
+    </main>
+
+    <nav id="quickbar" class="quickbar" aria-label="Quick actions"></nav>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

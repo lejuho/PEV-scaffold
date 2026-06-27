@@ -1,0 +1,12 @@
+{
+  "projects": [
+    {
+      "id": "cairn",
+      "name": "Cairn",
+      "root": "/home/pi/cairn",
+      "hermesScript": "/home/pi/PEV-scaffold/scripts/hermes-cycle-bot.py",
+      "claudePane": "cairn-claude:0",
+      "codexPane": "codex-hermes:0"
+    }
+  ]
+}
