@@ -12,6 +12,8 @@ This repo is a packaging layer. It contains portable scripts/dashboard files fro
 
 Read the runbook first if you need to know what Claude and Codex should do, where `.claude`, `.codex`, and `AGENTS.md` go in the target project, or how to operate one full cycle.
 
+If you are an agent asked to set up PEV from this README, open and follow `docs/RUNBOOK.md` end to end. The README is the index; the runbook is the executable setup guide.
+
 ## Contents
 
 - `docs/RUNBOOK.md`
@@ -92,7 +94,7 @@ claude --continue --dangerously-skip-permissions
 Default Codex startup:
 
 ```bash
-codex --no-alt-screen
+codex --no-alt-screen --dangerously-bypass-approvals-and-sandbox
 ```
 
 To attach:
@@ -212,7 +214,9 @@ Review append boundary:
 
 - Do not commit `config/hermes.env`, `dashboard/projects.json`, or `dashboard/state.json`.
 - Bind dashboard to `127.0.0.1` or private VPN/Tailscale only.
-- `--dangerously-skip-permissions` bypasses Claude Code approvals. Use only in an isolated local environment you can restore.
+- `--dangerously-skip-permissions` bypasses Claude Code approvals.
+- `--dangerously-bypass-approvals-and-sandbox` bypasses Codex approvals and sandboxing.
+- Use bypass modes only in an isolated local environment you can restore.
 - Telegram tokens and chat IDs must live only in `config/hermes.env`.
 
 ## Verify

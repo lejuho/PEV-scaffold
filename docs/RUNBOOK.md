@@ -2,6 +2,8 @@
 
 This is the first document for a new human operator, Claude executor, or Codex planner/reviewer. It explains what to copy into a target project, how agents know their roles, and how to run one cycle from start to merge.
 
+If an agent only receives `README.md`, it should follow the `Start Here` link to this runbook and execute the relevant setup sections in order.
+
 ## Mental Model
 
 PEV means Planner, Executor, Verifier.
@@ -214,7 +216,7 @@ Important fields:
 - `HERMES_CLAUDE_PANE`: usually `cairn-claude:0`.
 - `HERMES_CODEX_PANE`: usually `codex-hermes:0`.
 - `PEV_CLAUDE_ARGS`: default `--continue --dangerously-skip-permissions`.
-- `PEV_CODEX_ARGS`: default `--no-alt-screen`.
+- `PEV_CODEX_ARGS`: default `--no-alt-screen --dangerously-bypass-approvals-and-sandbox`.
 - `PEV_DASHBOARD_HOST`: private bind address.
 
 Install services:

@@ -7,7 +7,7 @@ CODEX_SESSION="${PEV_CODEX_SESSION:-codex-hermes}"
 CLAUDE_BIN="${PEV_CLAUDE_BIN:-/home/pi/.local/bin/claude}"
 CODEX_BIN="${PEV_CODEX_BIN:-/mnt/data/pi_storage/.npm-global/bin/codex}"
 CLAUDE_ARGS="${PEV_CLAUDE_ARGS:---continue --dangerously-skip-permissions}"
-CODEX_ARGS="${PEV_CODEX_ARGS:---no-alt-screen}"
+CODEX_ARGS="${PEV_CODEX_ARGS:---no-alt-screen --dangerously-bypass-approvals-and-sandbox}"
 
 export HOME="${HOME:-/home/pi}"
 export TERM="${TERM:-xterm-256color}"
