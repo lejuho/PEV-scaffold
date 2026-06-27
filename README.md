@@ -4,8 +4,18 @@ Planner-Executor-Verifier local scaffold for running a Claude executor, a Codex 
 
 This repo is a packaging layer. It contains portable scripts/dashboard files from a live Raspberry Pi setup plus generic multi-agent templates under `templates/multi-agent-artifact/`.
 
+## Start Here
+
+- Human/operator/agent runbook: [`docs/RUNBOOK.md`](docs/RUNBOOK.md)
+- Template bundle guide: [`templates/multi-agent-artifact/README.md`](templates/multi-agent-artifact/README.md)
+- Hook registration details: [`templates/multi-agent-artifact/HOOKS_REGISTRATION.md`](templates/multi-agent-artifact/HOOKS_REGISTRATION.md)
+
+Read the runbook first if you need to know what Claude and Codex should do, where `.claude`, `.codex`, and `AGENTS.md` go in the target project, or how to operate one full cycle.
+
 ## Contents
 
+- `docs/RUNBOOK.md`
+  - first-stop operating guide for humans, Claude, and Codex.
 - `scripts/`
   - `ensure-pev-tmux.sh`: creates stable tmux sessions for Claude and Codex.
   - `hermes-cycle-bot.py`: Telegram/Hermes bridge for `/tail`, `/say`, `/implement`, `/fix`, `/review`, `/recheck`, `/merge`, and flow commands.
