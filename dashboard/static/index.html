@@ -13,15 +13,16 @@
         <h1>PEV Dashboard</h1>
       </div>
       <div class="top-actions">
-        <button id="refresh">Refresh</button>
-        <label class="toggle"><input id="showArchived" type="checkbox" /> Show archived/hidden</label>
+        <button id="languageToggle" type="button" class="language-toggle" aria-label="Toggle language">KO</button>
+        <button id="refresh" type="button">Refresh</button>
+        <label class="toggle"><input id="showArchived" type="checkbox" /> <span id="showArchivedLabel">Show archived/hidden</span></label>
       </div>
     </header>
 
     <main>
       <section id="projects" class="projects"></section>
       <section class="panel">
-        <h2>Console</h2>
+        <h2 id="consoleTitle">Console</h2>
         <form id="sendForm" class="send-form">
           <select id="sendProject" aria-label="Project"></select>
           <select id="sendTarget" aria-label="Target">
@@ -29,7 +30,7 @@
             <option value="codex">Codex</option>
           </select>
           <input id="sendMessage" type="text" placeholder="Message to send via /say" autocomplete="off" />
-          <button type="submit">Send</button>
+          <button id="sendButton" type="submit">Send</button>
         </form>
         <pre id="console">Ready.</pre>
       </section>
