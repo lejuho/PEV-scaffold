@@ -107,6 +107,19 @@ def project_by_id(project_id: str) -> Project | None:
     return None
 
 
+def append_event(project: Project, event: str, data: dict[str, Any]) -> None:
+    """Append an event to the project's hermes-events.jsonl. Failures are ignored
+    so dashboard actions are never blocked by logging problems."""
+    try:
+        path = project.root / "logs" / "hermes-events.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        record = {"ts": utc_now(), "event": event, **data}
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
 def run_cmd(args: list[str], cwd: Path, timeout: int = 8) -> subprocess.CompletedProcess[str]:
     return subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=timeout)
 
@@ -316,6 +329,7 @@ def run_project_command(project: Project, command: str) -> dict[str, Any]:
     if not script.exists():
         raise FileNotFoundError(f"Hermes script not found: {script}")
     result = run_cmd([str(script), "--command", command], project.root, timeout=30)
+    append_event(project, "dashboard_command", {"command": command, "returncode": result.returncode})
     return {"returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
 
 
@@ -346,6 +360,11 @@ def create_done(project: Project, payload: dict[str, Any]) -> dict[str, Any]:
     }
     done_path.parent.mkdir(parents=True, exist_ok=True)
     done_path.write_text(json.dumps(done, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    append_event(
+        project,
+        "dashboard_done",
+        {"cycle": done["cycle"], "pass": done["pass"], "kind": done["kind"], "path": rel},
+    )
     return {"path": rel, "done": done}
 
 

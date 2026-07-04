@@ -362,6 +362,7 @@ def default_flow_state() -> dict[str, Any]:
         "last_action_at": None,
         "waiting_for_review_from": None,
         "processed_done_files": [],
+        "last_metric_keys": {},
         "updated_at": utc_now(),
     }
 
@@ -381,6 +382,8 @@ def load_flow_state(cfg: Config) -> dict[str, Any]:
         base["mode"] = "off"
     if not isinstance(base.get("processed_done_files"), list):
         base["processed_done_files"] = []
+    if not isinstance(base.get("last_metric_keys"), dict):
+        base["last_metric_keys"] = {}
     return base
 
 
@@ -1185,8 +1188,101 @@ def notify_if_changed(cfg: Config, previous: dict[str, Any] | None, state: Cycle
     if previous.get("phase") == state.phase and previous.get("latest_review") == state.latest_review:
         return
     msg = f"Hermes cycle state changed\n\n{format_status(state)}"
-    log_event(cfg, "state_changed", {"previous_phase": previous.get("phase"), "phase": state.phase})
+    log_event(
+        cfg,
+        "state_changed",
+        {
+            "previous_phase": previous.get("phase"),
+            "phase": state.phase,
+            "cycle": state.cycle,
+            "status": state.status,
+            "verdict": state.verdict,
+            "latest_review": state.latest_review,
+            "pass": review_number(state.latest_review),
+        },
+    )
     send_telegram(cfg, msg)
+
+
+def iter_done_files(cycle_dir: Path, root: Path):
+    """Yield (path, rel_path, pass_no) for each executor done file in a cycle dir."""
+    seen: set[str] = set()
+    search_dirs = [cycle_dir / "executor", cycle_dir]
+    for base in search_dirs:
+        if not base.exists():
+            continue
+        for path in sorted(base.glob("pass-*-done.json")):
+            match = EXECUTOR_DONE_RE.search(path.name)
+            if not match:
+                continue
+            rel = str(path.relative_to(root))
+            if rel in seen:
+                continue
+            seen.add(rel)
+            yield path, rel, int(match.group(1))
+
+
+def record_metric_events(cfg: Config, state: CycleState) -> None:
+    """Emit cycle-context metric events (cycle_started, pass_done, verdict) once each.
+
+    Deduplicated via flow state's ``last_metric_keys``. Historical cycles are
+    reconstructed by dashboard/metrics.py directly from artifacts; these live
+    events give it precise timestamps going forward.
+    """
+    if state.cycle is None:
+        return
+    flow = load_flow_state(cfg)
+    keys = flow.get("last_metric_keys")
+    if not isinstance(keys, dict):
+        keys = {}
+    now = utc_now()
+    changed = False
+
+    started_key = f"cycle_started:{state.cycle}"
+    if started_key not in keys:
+        log_event(cfg, "cycle_started", {"cycle": state.cycle})
+        keys[started_key] = now
+        changed = True
+
+    cycle_dir = cfg.root / ".review" / f"cycle-{state.cycle}"
+    for path, rel, pass_no in iter_done_files(cycle_dir, cfg.root):
+        done_key = f"pass_done:{rel}"
+        if done_key in keys:
+            continue
+        info: dict[str, Any] = {}
+        try:
+            info = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            info = {}
+        kind = info.get("kind") or ("implement" if pass_no <= 1 else "fix")
+        log_event(
+            cfg,
+            "pass_done",
+            {
+                "cycle": state.cycle,
+                "pass": pass_no,
+                "kind": kind,
+                "done_path": rel,
+                "created_at": info.get("createdAt"),
+            },
+        )
+        keys[done_key] = now
+        changed = True
+
+    if state.verdict and state.latest_review:
+        verdict_key = f"verdict:{state.latest_review}:{state.verdict}"
+        if verdict_key not in keys:
+            log_event(
+                cfg,
+                "verdict",
+                {"cycle": state.cycle, "review": state.latest_review, "verdict": state.verdict},
+            )
+            keys[verdict_key] = now
+            changed = True
+
+    if changed:
+        flow["last_metric_keys"] = keys
+        save_flow_state(cfg, flow)
 
 
 def tick(cfg: Config, once: bool) -> CycleState:
@@ -1194,6 +1290,7 @@ def tick(cfg: Config, once: bool) -> CycleState:
     state = scan_state(cfg)
     save_state(cfg, state)
     notify_if_changed(cfg, previous, state)
+    record_metric_events(cfg, state)
     process_updates(cfg, state, once=once)
     maybe_advance_flow(cfg, state, force=False)
     return state
