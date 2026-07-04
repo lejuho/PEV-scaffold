@@ -515,6 +515,39 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
+        tag_match = re.fullmatch(r"/api/projects/([^/]+)/cycles/(\d+)/tag", path)
+        if tag_match:
+            project = project_by_id(unquote(tag_match.group(1)))
+            if not project:
+                self.send_error_json("Unknown project", 404)
+                return
+            cycle_n = tag_match.group(2)
+            try:
+                body = self.read_body()
+                tag = str(body.get("tag") or "").strip()
+                valid = {"executor", "plan", "reviewer", "infra"}
+                if tag and tag not in valid and tag not in {"none", "clear"}:
+                    raise ValueError(f"Unknown failure tag: {tag}")
+                state = load_state()
+                meta = state["projects"].setdefault(project.id, {})
+                tags = meta.get("cycleTags")
+                if not isinstance(tags, dict):
+                    tags = {}
+                if tag in valid:
+                    tags[cycle_n] = tag
+                else:
+                    tags.pop(cycle_n, None)
+                meta["cycleTags"] = tags
+                write_json(STATE_PATH, state)
+                # drop the metrics cache so failureTag reflects immediately
+                try:
+                    (project.root / "logs" / "pev-metrics.json").unlink(missing_ok=True)
+                except OSError:
+                    pass
+                self.send_json({"ok": True, "cycleTags": tags})
+            except (OSError, ValueError, json.JSONDecodeError) as err:
+                self.send_error_json(str(err), 400)
+            return
         match = re.fullmatch(r"/api/projects/([^/]+)/(command|meta|done)", path)
         if not match:
             self.send_error(HTTPStatus.NOT_FOUND)

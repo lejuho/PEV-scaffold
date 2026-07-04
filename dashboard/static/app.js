@@ -136,6 +136,11 @@ const copy = {
     unknownErrors: "Errors",
     firstPassRate: "first-pass rate",
     reworkTotal: "rework total",
+    tag_executor: "executor",
+    tag_plan: "plan",
+    tag_reviewer: "reviewer FP",
+    tag_infra: "infra",
+    trend: "Trend (last 20)",
   },
   ko: {
     refresh: "새로고침",
@@ -252,6 +257,11 @@ const copy = {
     unknownErrors: "오류",
     firstPassRate: "first-pass 비율",
     reworkTotal: "누적 재작업",
+    tag_executor: "실행자",
+    tag_plan: "플랜",
+    tag_reviewer: "리뷰어 오탐",
+    tag_infra: "인프라",
+    trend: "추세 (최근 20)",
   },
 };
 
@@ -460,14 +470,48 @@ function metricsSummaryLine(project, m) {
   return `<div class="metrics-summary" title="${esc(t("autonomyTooltip"))}">${parts.map(esc).join(" · ")}</div>`;
 }
 
+function sparkline(m) {
+  const cycles = (m.cycles || []).slice(-20);
+  if (cycles.length === 0) return "";
+  const maxCost = Math.max(1e-6, ...cycles.map((c) => c.costUsd || 0));
+  const n = cycles.length;
+  const slot = 200 / n;
+  const bw = Math.max(2, slot * 0.7);
+  const bars = cycles.map((c, i) => {
+    const h = Math.max(1, ((c.costUsd || 0) / maxCost) * 30);
+    const x = i * slot + (slot - bw) / 2;
+    const y = 32 - h;
+    const fill = c.firstPass ? "var(--good)" : c.passes > 1 ? "var(--warn)" : "var(--muted)";
+    return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" rx="1" fill="${fill}"><title>cycle ${c.cycle}: ${formatUsd(c.costUsd)}${c.firstPass ? " · first-pass" : ""}</title></rect>`;
+  }).join("");
+  return `
+    <div class="metrics-subtitle">${t("trend")}</div>
+    <svg class="metrics-sparkline" viewBox="0 0 200 34" preserveAspectRatio="none" role="img" aria-label="${t("trend")}">${bars}</svg>`;
+}
+
 function verdictShort(v) {
   if (v === "READY_TO_MERGE") return "RTM";
   if (v === "BLOCKED") return "BLK";
   return v || "-";
 }
 
+const FAILURE_TAGS = ["executor", "plan", "reviewer", "infra"];
+
+function tagLabel(tag) {
+  return t(`tag_${tag}`);
+}
+
 function failureTagCell(project, c) {
-  return c.failureTag ? `<span class="tag-chip">${esc(c.failureTag)}</span>` : "-";
+  const hadBlocked = c.finalVerdict && (!c.firstPass || c.passes > 1 || c.blockedToFixSec !== null);
+  if (!hadBlocked) {
+    return c.failureTag ? `<span class="tag-chip">${esc(tagLabel(c.failureTag))}</span>` : "-";
+  }
+  const buttons = FAILURE_TAGS.map((tag) => `
+    <button type="button" class="tag-btn ${c.failureTag === tag ? "active" : ""}"
+            data-action="tag" data-project="${project.id}" data-cycle="${c.cycle}" data-tag="${tag}">
+      ${esc(tagLabel(tag))}
+    </button>`).join("");
+  return `<div class="tag-buttons">${buttons}</div>`;
 }
 
 function historyTable(project, m) {
@@ -540,6 +584,7 @@ function renderMetricsContent(project) {
   const m = entry.data;
   return `
     ${metricsSummaryLine(project, m)}
+    ${sparkline(m)}
     ${historyTable(project, m)}
     ${errorFeed(m)}
     <button type="button" class="action-btn compact" data-action="metrics" data-project="${project.id}">
@@ -769,6 +814,17 @@ async function handleAction(button) {
   const project = button.dataset.project;
   if (button.dataset.action === "metrics") {
     await loadMetrics(project, metricsCache[project] && !metricsCache[project].loading);
+    return;
+  }
+  if (button.dataset.action === "tag") {
+    const cycle = button.dataset.cycle;
+    const current = metricsCache[project]?.data?.cycles?.find((c) => String(c.cycle) === cycle)?.failureTag;
+    const next = current === button.dataset.tag ? "" : button.dataset.tag;
+    await api(`/api/projects/${encodeURIComponent(project)}/cycles/${encodeURIComponent(cycle)}/tag`, {
+      method: "POST",
+      body: JSON.stringify({ tag: next }),
+    });
+    await loadMetrics(project, true);
     return;
   }
   if (button.dataset.action === "metrics-more") {
