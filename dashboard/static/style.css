@@ -369,6 +369,19 @@ pre {
 
 /* --- metrics --- */
 .metrics-block { margin-top: 14px; }
+.meta-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  background: rgba(136, 192, 255, 0.12);
+  font-size: 0.84rem;
+}
 .metrics-summary {
   border: 1px solid var(--border);
   border-radius: 12px;

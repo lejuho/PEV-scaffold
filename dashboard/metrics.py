@@ -96,6 +96,26 @@ def load_events(root: Path) -> list[dict[str, Any]]:
     return events
 
 
+def last_meta_cycle_at(root: Path) -> int | None:
+    """Highest cyclesAt recorded in logs/meta-cycles.jsonl, or None."""
+    path = root / "logs" / "meta-cycles.jsonl"
+    if not path.exists():
+        return None
+    best: int | None = None
+    for line in read_text(path).splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        val = rec.get("cyclesAt")
+        if isinstance(val, int) and (best is None or val > best):
+            best = val
+    return best
+
+
 def load_pricing() -> dict[str, Any]:
     for name in ("pricing.json", "pricing.example.json"):
         path = APP_DIR / name
@@ -411,6 +431,7 @@ def compute_metrics(
         "reworkCostUsd": round(total_rework, 4),
         "unattributedTokens": unattributed,
         "unattributedCostUsd": round(unattributed_cost[0], 4),
+        "lastMetaCycleAt": last_meta_cycle_at(root),
     }
 
     return {

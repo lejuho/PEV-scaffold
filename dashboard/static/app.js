@@ -141,6 +141,9 @@ const copy = {
     tag_reviewer: "reviewer FP",
     tag_infra: "infra",
     trend: "Trend (last 20)",
+    metaBanner: "Meta-cycle suggested — retro PEV against itself.",
+    metaCopy: "📋 Copy meta-cycle prompt",
+    metaCopied: "Meta-cycle prompt copied to clipboard.",
   },
   ko: {
     refresh: "새로고침",
@@ -262,6 +265,9 @@ const copy = {
     tag_reviewer: "리뷰어 오탐",
     tag_infra: "인프라",
     trend: "추세 (최근 20)",
+    metaBanner: "메타 사이클 제안 — PEV 자체를 회고할 시점입니다.",
+    metaCopy: "📋 메타 사이클 프롬프트 복사",
+    metaCopied: "메타 사이클 프롬프트를 클립보드에 복사했습니다.",
   },
 };
 
@@ -570,6 +576,47 @@ function errorFeed(m) {
     </div>`;
 }
 
+function metaCycleDue(m) {
+  const total = m.totals?.cycles || 0;
+  if (total === 0 || total % 10 !== 0) return false;
+  const last = m.totals?.lastMetaCycleAt;
+  return last === null || last === undefined || total - last >= 10;
+}
+
+function metaBanner(project, m) {
+  if (!metaCycleDue(m)) return "";
+  return `
+    <div class="meta-banner">
+      <span>${esc(t("metaBanner"))}</span>
+      <button type="button" class="action-btn compact" data-action="meta-copy" data-project="${project.id}">
+        <span class="btn-title">${t("metaCopy")}</span>
+      </button>
+    </div>`;
+}
+
+function metaCyclePrompt(project, m) {
+  const tt = m.totals || {};
+  const tagCounts = {};
+  (m.cycles || []).slice(-20).forEach((c) => {
+    if (c.failureTag) tagCounts[c.failureTag] = (tagCounts[c.failureTag] || 0) + 1;
+  });
+  const tagLine = FAILURE_TAGS.map((tag) => `${tag} ${tagCounts[tag] || 0}`).join(" · ");
+  return [
+    `Run a PEV meta-cycle for project "${project.name}" using templates/multi-agent-artifact/meta-cycle-template.md.`,
+    "",
+    "Baseline (from logs/pev-metrics.json → totals):",
+    `- cycles: ${tt.cycles}`,
+    `- first-pass rate: ${tt.firstPassRate}`,
+    `- autonomy hours: ${tt.autonomyHours}`,
+    `- cost: $${tt.costUsd} · rework: $${tt.reworkCostUsd}`,
+    `- failure tags (last 20): ${tagLine}`,
+    "",
+    "Follow the template: read the signal, propose ≤3 concrete diffs (each naming",
+    "a target metric + value), define the comparison, and append the result to",
+    "logs/meta-cycles.jsonl. Do not auto-apply — produce the decision.",
+  ].join("\n");
+}
+
 function renderMetricsContent(project) {
   const entry = metricsCache[project.id];
   if (!entry) {
@@ -583,6 +630,7 @@ function renderMetricsContent(project) {
   }
   const m = entry.data;
   return `
+    ${metaBanner(project, m)}
     ${metricsSummaryLine(project, m)}
     ${sparkline(m)}
     ${historyTable(project, m)}
@@ -814,6 +862,18 @@ async function handleAction(button) {
   const project = button.dataset.project;
   if (button.dataset.action === "metrics") {
     await loadMetrics(project, metricsCache[project] && !metricsCache[project].loading);
+    return;
+  }
+  if (button.dataset.action === "meta-copy") {
+    const m = metricsCache[project]?.data;
+    if (!m) return;
+    const text = metaCyclePrompt(projects.find((p) => p.id === project) || { name: project }, m);
+    try {
+      await navigator.clipboard.writeText(text);
+      log(t("metaCopied"));
+    } catch {
+      log(text);
+    }
     return;
   }
   if (button.dataset.action === "tag") {

@@ -400,3 +400,49 @@ bash .claude/hooks/check-marker-sync.sh
 ```
 
 If the same error signature appears twice, stop repeating the same command. Inspect root cause or ask a clean-context advisor/reviewer.
+
+## Meta-cycle operation (self-improvement loop)
+
+The metrics lab (`dashboard/metrics.py` + the dashboard metrics block) measures
+PEV so PEV can improve itself. Every ~10 cycles, run one **meta-cycle**: a
+retrospective that turns those numbers into concrete changes to the PEV machine.
+
+**When to run.** The dashboard shows a "meta-cycle suggested" banner when a
+project's `totals.cycles` is a multiple of 10 and no meta-cycle has been logged
+in the last 10 cycles. The banner's button only **copies the meta-cycle prompt
+to the clipboard** — it never auto-starts anything. A human decides to run it.
+
+**How to run.**
+
+1. Refresh the metrics block and read `totals`, the sparkline, the history
+   table, and the failure-tag distribution.
+2. Open `templates/multi-agent-artifact/meta-cycle-template.md`, paste in the
+   baseline numbers, and work through it. Product = ≤3 concrete diff proposals,
+   each naming a target metric and value (e.g. "first-pass 0.70 → 0.80, remeasure
+   after 10 cycles").
+3. Apply the agreed diffs as ordinary cycles in the following iterations.
+
+**Record every meta-cycle** by appending one line to `logs/meta-cycles.jsonl`:
+
+```bash
+python3 - <<'PY'
+import json, datetime, pathlib
+line = {
+    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+    "cyclesAt": 82,                       # totals.cycles at the moment of change
+    "changes": ["no-new-deps assertion in AGENTS.md"],
+    "baseline": {                         # totals snapshot for later comparison
+        "firstPassRate": 0.37, "autonomyHours": 136.1,
+        "costUsd": 367.2, "reworkCostUsd": 115.4,
+    },
+}
+p = pathlib.Path("logs/meta-cycles.jsonl")
+with p.open("a", encoding="utf-8") as fh:
+    fh.write(json.dumps(line, ensure_ascii=False) + "\n")
+print("appended", p)
+PY
+```
+
+The `baseline` snapshot is what the *next* meta-cycle diffs against to judge
+whether the previous change actually moved the metric it targeted. Without this
+record, "did it help?" is unanswerable and the loop degrades into guesswork.
