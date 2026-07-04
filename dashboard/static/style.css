@@ -366,3 +366,57 @@ pre {
 @media (prefers-reduced-motion: reduce) {
   .section-caret { transition: none; }
 }
+
+/* --- metrics --- */
+.metrics-block { margin-top: 14px; }
+.metrics-summary {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: rgba(136, 192, 255, 0.06);
+  font-size: 0.84rem;
+  color: var(--text);
+  cursor: help;
+}
+.metrics-subtitle {
+  color: var(--muted);
+  font-size: 0.74rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin: 12px 0 6px;
+}
+.table-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; }
+.metrics-table { border-collapse: collapse; width: 100%; font-size: 0.78rem; min-width: 520px; }
+.metrics-table th, .metrics-table td { padding: 6px 8px; text-align: right; white-space: nowrap; }
+.metrics-table th:first-child, .metrics-table td:first-child { text-align: left; }
+.metrics-table thead th { color: var(--muted); border-bottom: 1px solid var(--border); font-weight: 600; }
+.metrics-table tbody tr:nth-child(even) { background: rgba(255,255,255,0.025); }
+.metrics-table tr.fp-good td:first-child { box-shadow: inset 3px 0 0 var(--good); }
+.metrics-table tr.fp-rework td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
+.metrics-sparkline { display: block; margin: 8px 0 2px; width: 100%; height: 34px; }
+.err-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.err-list li { font-size: 0.78rem; color: var(--muted); }
+.err-label { font-weight: 600; }
+.err-list li.err-warn .err-label { color: var(--warn); }
+.err-list li.err-bad .err-label { color: var(--bad); }
+.muted-line { color: var(--muted); font-size: 0.8rem; }
+.tag-chip {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  font-size: 0.72rem;
+}
+.tag-buttons { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.tag-btn {
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 2px 9px;
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+.tag-btn.active { color: var(--text); border-color: var(--accent); background: rgba(136,192,255,0.15); }
+.tag-btn:hover { color: var(--text); }

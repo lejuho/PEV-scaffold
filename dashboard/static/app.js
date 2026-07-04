@@ -15,6 +15,8 @@ const quickbarEl = document.querySelector("#quickbar");
 let projects = [];
 const compactMedia = window.matchMedia("(max-width: 620px)");
 const expandedSections = new Set();
+const metricsCache = {};
+const metricsExpanded = new Set();
 let quickProjectId = "";
 let language = localStorage.getItem("pevLanguage") || "en";
 
@@ -107,6 +109,33 @@ const copy = {
     noExpectedDone: "No expected done file for this project state.",
     createSummary: "Manual PEV dashboard done signal.",
     checksPrompt: "Checks run, one per line:",
+    metrics: "📊 Metrics",
+    loadMetrics: "Load metrics",
+    refreshMetrics: "Refresh metrics",
+    metricsLoading: "Computing metrics…",
+    elapsed: "cycle elapsed",
+    thisCycle: "this cycle",
+    firstPassStreak: "first-pass streak",
+    cumulativeAutonomy: "autonomy total",
+    autonomyTooltip: "v1: autonomy = full cycle duration (a human did not drive it). Interventions are counted separately so you can discount them.",
+    history: "Cycle history",
+    colCycle: "cycle",
+    colVerdict: "verdict",
+    colPasses: "passes",
+    colDuration: "duration",
+    colCost: "cost",
+    colRework: "rework",
+    colInterventions: "interventions",
+    colFindFix: "find→fix",
+    colTag: "tag",
+    errorFeed: "Error feed",
+    showMore: "Show more",
+    showLess: "Show less",
+    noErrors: "No errors recorded.",
+    networkUnstable: "Network instability",
+    unknownErrors: "Errors",
+    firstPassRate: "first-pass rate",
+    reworkTotal: "rework total",
   },
   ko: {
     refresh: "새로고침",
@@ -196,6 +225,33 @@ const copy = {
     noExpectedDone: "현재 프로젝트 상태에 expected done 파일이 없습니다.",
     createSummary: "수동 PEV dashboard done 신호.",
     checksPrompt: "실행한 check를 줄마다 입력:",
+    metrics: "📊 지표",
+    loadMetrics: "지표 불러오기",
+    refreshMetrics: "지표 새로고침",
+    metricsLoading: "지표 계산 중…",
+    elapsed: "사이클 경과",
+    thisCycle: "이번 사이클",
+    firstPassStreak: "first-pass 연속",
+    cumulativeAutonomy: "누적 자동",
+    autonomyTooltip: "v1 정의: 자동 시간 = 사이클 전체 길이(사람이 직접 조작하지 않은 시간). 개입 횟수는 따로 세어 해석에 참고하세요.",
+    history: "사이클 히스토리",
+    colCycle: "사이클",
+    colVerdict: "판정",
+    colPasses: "passes",
+    colDuration: "소요",
+    colCost: "비용",
+    colRework: "재작업",
+    colInterventions: "개입",
+    colFindFix: "발견→수정",
+    colTag: "태그",
+    errorFeed: "오류 피드",
+    showMore: "더보기",
+    showLess: "접기",
+    noErrors: "기록된 오류 없음.",
+    networkUnstable: "네트워크 불안정",
+    unknownErrors: "오류",
+    firstPassRate: "first-pass 비율",
+    reworkTotal: "누적 재작업",
   },
 };
 
@@ -345,6 +401,152 @@ function section(project, title, subtitle, body, cls = "") {
   `;
 }
 
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+function formatDuration(sec) {
+  if (sec === null || sec === undefined) return "-";
+  sec = Math.max(0, Math.round(sec));
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m`;
+  return `${sec}s`;
+}
+
+function formatUsd(v) {
+  if (v === null || v === undefined) return "-";
+  return `$${Number(v).toFixed(2)}`;
+}
+
+function hhmm(iso) {
+  if (!iso) return "?";
+  const d = new Date(iso);
+  if (isNaN(d)) return "?";
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+function firstPassStreak(cycles) {
+  let streak = 0;
+  for (let i = cycles.length - 1; i >= 0; i--) {
+    if (cycles[i].finalVerdict === null || cycles[i].finalVerdict === undefined) continue;
+    if (cycles[i].firstPass) streak++;
+    else break;
+  }
+  return streak;
+}
+
+function currentElapsedSec(project, cycles) {
+  const last = cycles[cycles.length - 1];
+  if (!last) return null;
+  if (last.durationSec !== null && last.durationSec !== undefined) return last.durationSec;
+  if (last.startedAt) {
+    const start = new Date(last.startedAt).getTime();
+    if (!isNaN(start)) return (Date.now() - start) / 1000;
+  }
+  return null;
+}
+
+function metricsSummaryLine(project, m) {
+  const cycles = m.cycles || [];
+  const last = cycles[cycles.length - 1] || {};
+  const parts = [
+    `${t("elapsed")} ${formatDuration(currentElapsedSec(project, cycles))}`,
+    `${t("thisCycle")} ${formatUsd(last.costUsd)}`,
+    `${t("firstPassStreak")} ${firstPassStreak(cycles)}`,
+    `${t("cumulativeAutonomy")} ${(m.totals?.autonomyHours ?? 0).toFixed(1)}h`,
+  ];
+  return `<div class="metrics-summary" title="${esc(t("autonomyTooltip"))}">${parts.map(esc).join(" · ")}</div>`;
+}
+
+function verdictShort(v) {
+  if (v === "READY_TO_MERGE") return "RTM";
+  if (v === "BLOCKED") return "BLK";
+  return v || "-";
+}
+
+function failureTagCell(project, c) {
+  return c.failureTag ? `<span class="tag-chip">${esc(c.failureTag)}</span>` : "-";
+}
+
+function historyTable(project, m) {
+  const cycles = (m.cycles || []).slice().reverse();
+  const expanded = metricsExpanded.has(project.id);
+  const shown = expanded ? cycles : cycles.slice(0, 20);
+  const rows = shown.map((c) => {
+    const tagCell = failureTagCell(project, c);
+    return `
+      <tr class="${c.firstPass ? "fp-good" : c.passes > 1 ? "fp-rework" : ""}">
+        <td>${c.cycle}</td>
+        <td>${verdictShort(c.finalVerdict)}</td>
+        <td>${c.passes}</td>
+        <td>${formatDuration(c.durationSec)}</td>
+        <td>${formatUsd(c.costUsd)}</td>
+        <td>${formatUsd(c.reworkCostUsd)}</td>
+        <td>${c.interventions}</td>
+        <td>${formatDuration(c.blockedToFixSec)}</td>
+        <td>${tagCell}</td>
+      </tr>`;
+  }).join("");
+  const moreBtn = cycles.length > 20
+    ? `<button type="button" class="action-btn compact" data-action="metrics-more" data-project="${project.id}">
+         <span class="btn-title">${expanded ? t("showLess") : t("showMore")} (${cycles.length})</span>
+       </button>`
+    : "";
+  return `
+    <div class="metrics-history">
+      <div class="metrics-subtitle">${t("history")}</div>
+      <div class="table-scroll">
+        <table class="metrics-table">
+          <thead><tr>
+            <th>${t("colCycle")}</th><th>${t("colVerdict")}</th><th>${t("colPasses")}</th>
+            <th>${t("colDuration")}</th><th>${t("colCost")}</th><th>${t("colRework")}</th>
+            <th>${t("colInterventions")}</th><th>${t("colFindFix")}</th><th>${t("colTag")}</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+      ${moreBtn}
+    </div>`;
+}
+
+function errorFeed(m) {
+  const errors = m.errors || [];
+  if (errors.length === 0) return `<div class="metrics-errors"><div class="metrics-subtitle">${t("errorFeed")}</div><div class="muted-line">${t("noErrors")}</div></div>`;
+  const items = errors.slice().reverse().slice(0, 12).map((e) => {
+    const label = e.kind === "infra" ? t("networkUnstable") : t("unknownErrors");
+    const cls = e.kind === "infra" ? "warn" : "bad";
+    return `<li class="err-${cls}"><span class="err-label">${esc(label)}</span> ${hhmm(e.firstTs)}–${hhmm(e.lastTs)} (${e.count})</li>`;
+  }).join("");
+  return `
+    <div class="metrics-errors">
+      <div class="metrics-subtitle">${t("errorFeed")}</div>
+      <ul class="err-list">${items}</ul>
+    </div>`;
+}
+
+function renderMetricsContent(project) {
+  const entry = metricsCache[project.id];
+  if (!entry) {
+    return `<button type="button" class="action-btn" data-action="metrics" data-project="${project.id}">
+      <span class="btn-title">${t("metrics")}</span>
+      <span class="btn-desc">${t("loadMetrics")}</span>
+    </button>`;
+  }
+  if (entry.loading) {
+    return `<div class="metrics-summary">${t("metricsLoading")}</div>`;
+  }
+  const m = entry.data;
+  return `
+    ${metricsSummaryLine(project, m)}
+    ${historyTable(project, m)}
+    ${errorFeed(m)}
+    <button type="button" class="action-btn compact" data-action="metrics" data-project="${project.id}">
+      <span class="btn-title">${t("refreshMetrics")}</span>
+    </button>`;
+}
+
 function render() {
   const visible = visibleProjects();
   if (visible.length === 0) {
@@ -384,6 +586,7 @@ function render() {
         </div>
         ${agentStatusRow(p)}
         <div class="flow">${flowSteps}</div>
+        <div class="metrics-block" data-metrics-block="${p.id}">${renderMetricsContent(p)}</div>
         <div class="controls">
           ${section(p, t("flowMode"), t("flowModeDesc"), `
             ${commandButton(p, t("status"), "/flow status", t("statusDesc"))}
@@ -548,8 +751,32 @@ async function createDone(projectId) {
   await load();
 }
 
+async function loadMetrics(projectId, force = false) {
+  metricsCache[projectId] = { loading: true, data: metricsCache[projectId]?.data };
+  render();
+  try {
+    const body = await api(`/api/projects/${encodeURIComponent(projectId)}/metrics${force ? "?force=1" : ""}`);
+    metricsCache[projectId] = { loading: false, data: body.metrics };
+  } catch (err) {
+    delete metricsCache[projectId];
+    render();
+    throw err;
+  }
+  render();
+}
+
 async function handleAction(button) {
   const project = button.dataset.project;
+  if (button.dataset.action === "metrics") {
+    await loadMetrics(project, metricsCache[project] && !metricsCache[project].loading);
+    return;
+  }
+  if (button.dataset.action === "metrics-more") {
+    if (metricsExpanded.has(project)) metricsExpanded.delete(project);
+    else metricsExpanded.add(project);
+    render();
+    return;
+  }
   if (button.dataset.action === "toggle-section") {
     const key = button.dataset.section;
     if (expandedSections.has(key)) {
