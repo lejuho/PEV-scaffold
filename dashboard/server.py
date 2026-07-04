@@ -16,8 +16,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
+import metrics
+
 
 APP_ROOT = Path(__file__).resolve().parent
+METRICS_CACHE_SECONDS = 60
 PROJECTS_PATH = Path(os.environ.get("PEV_PROJECTS", APP_ROOT / "projects.json"))
 STATE_PATH = Path(os.environ.get("PEV_STATE", APP_ROOT / "state.json"))
 HOST = os.environ.get("PEV_DASHBOARD_HOST", "127.0.0.1")
@@ -368,6 +371,36 @@ def create_done(project: Project, payload: dict[str, Any]) -> dict[str, Any]:
     return {"path": rel, "done": done}
 
 
+def project_cycle_tags(meta: dict[str, Any]) -> dict[str, str]:
+    tags = meta.get("cycleTags")
+    if not isinstance(tags, dict):
+        return {}
+    return {str(k): str(v) for k, v in tags.items() if v}
+
+
+def project_metrics(project: Project, meta: dict[str, Any], *, force: bool = False) -> dict[str, Any]:
+    """Return metrics for a project, reusing logs/pev-metrics.json when it is
+    fresh (<60s) and no failure tags have changed since it was written."""
+    cache_path = project.root / "logs" / "pev-metrics.json"
+    tags = project_cycle_tags(meta)
+    if not force and cache_path.exists():
+        try:
+            age = time.time() - cache_path.stat().st_mtime
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            cached = None
+            age = None
+        if cached is not None and age is not None and age < METRICS_CACHE_SECONDS:
+            return cached
+    result = metrics.compute_metrics(project.root, tags=tags)
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+    return result
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "PEVDashboard/0.1"
 
@@ -425,6 +458,47 @@ class Handler(BaseHTTPRequestHandler):
                 return
             meta = load_state()["projects"].get(project.id, {})
             self.send_json({"ok": True, "project": scan_project(project, meta), "updatedAt": utc_now()})
+            return
+        if path == "/api/metrics/summary":
+            state = load_state()
+            summaries = []
+            combined = {
+                "cycles": 0,
+                "autonomyHours": 0.0,
+                "costUsd": 0.0,
+                "reworkCostUsd": 0.0,
+            }
+            for project in load_projects():
+                meta = state["projects"].get(project.id, {})
+                try:
+                    data = project_metrics(project, meta)
+                except (OSError, ValueError) as err:
+                    summaries.append({"id": project.id, "name": project.name, "error": str(err)})
+                    continue
+                totals = data.get("totals", {})
+                summaries.append({"id": project.id, "name": project.name, "totals": totals})
+                combined["cycles"] += totals.get("cycles") or 0
+                combined["autonomyHours"] += totals.get("autonomyHours") or 0.0
+                combined["costUsd"] += totals.get("costUsd") or 0.0
+                combined["reworkCostUsd"] += totals.get("reworkCostUsd") or 0.0
+            for key in ("autonomyHours", "costUsd", "reworkCostUsd"):
+                combined[key] = round(combined[key], 4)
+            self.send_json({"ok": True, "projects": summaries, "combined": combined, "updatedAt": utc_now()})
+            return
+        match = re.fullmatch(r"/api/projects/([^/]+)/metrics", path)
+        if match:
+            project = project_by_id(unquote(match.group(1)))
+            if not project:
+                self.send_error_json("Unknown project", 404)
+                return
+            meta = load_state()["projects"].get(project.id, {})
+            force = parse_qs(parsed.query).get("force", ["0"])[0] in ("1", "true")
+            try:
+                data = project_metrics(project, meta, force=force)
+            except (OSError, ValueError) as err:
+                self.send_error_json(str(err), 500)
+                return
+            self.send_json({"ok": True, "metrics": data, "updatedAt": utc_now()})
             return
         match = re.fullmatch(r"/api/projects/([^/]+)/tail", path)
         if match:
