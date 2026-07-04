@@ -1,0 +1,12 @@
+{
+  "models": {
+    "default": {
+      "inputPerMTok": 3.0,
+      "outputPerMTok": 15.0,
+      "cacheWrite5mPerMTok": 3.75,
+      "cacheWrite1hPerMTok": 6.0,
+      "cacheReadPerMTok": 0.3
+    }
+  },
+  "note": "USD per million tokens. Values are examples — replace with the real per-model rates you are billed. Copy this file to dashboard/pricing.json (committing it is fine — no secrets). Keys under 'models' are matched against the transcript's message.model; 'default' is used when no key matches."
+}
