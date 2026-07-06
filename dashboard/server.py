@@ -18,13 +18,26 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import metrics
 
-
 APP_ROOT = Path(__file__).resolve().parent
+for _candidate in (APP_ROOT.parent / "scripts", Path("/home/pi/PEV-scaffold/scripts")):
+    if (_candidate / "pev_runner.py").exists():
+        if str(_candidate) not in sys.path:
+            sys.path.insert(0, str(_candidate))
+        break
+from pev_runner import AgentRunner, RunnerConfig  # noqa: E402
+
 METRICS_CACHE_SECONDS = 60
 PROJECTS_PATH = Path(os.environ.get("PEV_PROJECTS", APP_ROOT / "projects.json"))
 STATE_PATH = Path(os.environ.get("PEV_STATE", APP_ROOT / "state.json"))
 HOST = os.environ.get("PEV_DASHBOARD_HOST", "127.0.0.1")
 PORT = int(os.environ.get("PEV_DASHBOARD_PORT", "8765"))
+
+INIT_JOBS_DIR = Path(os.environ.get("PEV_INIT_JOBS", APP_ROOT / "init-jobs"))
+PEVCTL_PATH = next(
+    (c / "pevctl.py" for c in (APP_ROOT.parent / "scripts", Path("/home/pi/PEV-scaffold/scripts"))
+     if (c / "pevctl.py").exists()),
+    None,
+)
 
 VERDICTS = ("BLOCKED", "PASS", "READY_TO_MERGE")
 SAFE_COMMANDS = {
@@ -53,6 +66,13 @@ class Project:
     hermes_script: str
     claude_pane: str | None = None
     codex_pane: str | None = None
+    driver: str = "tmux"
+    raw: dict[str, Any] | None = None
+
+    def runner(self) -> AgentRunner:
+        item = dict(self.raw or {})
+        item.setdefault("root", str(self.root))
+        return AgentRunner(RunnerConfig.from_project(item))
 
 
 def utc_now() -> str:
@@ -87,6 +107,8 @@ def load_projects() -> list[Project]:
                     hermes_script=str(item.get("hermesScript") or "scripts/hermes-cycle-bot.py"),
                     claude_pane=item.get("claudePane"),
                     codex_pane=item.get("codexPane"),
+                    driver=str(item.get("driver") or "tmux"),
+                    raw=dict(item),
                 )
             )
         except (KeyError, TypeError, ValueError):
@@ -123,8 +145,8 @@ def append_event(project: Project, event: str, data: dict[str, Any]) -> None:
         pass
 
 
-def run_cmd(args: list[str], cwd: Path, timeout: int = 8) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+def run_cmd(args: list[str], cwd: Path, timeout: int = 8, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=timeout, env=env)
 
 
 def git_out(project: Project, args: list[str]) -> str | None:
@@ -208,33 +230,15 @@ def flow_state(project: Project) -> dict[str, Any]:
     return read_json(project.root / "logs" / "hermes-flow.json", {})
 
 
-def pane_tail(pane: str | None, lines: int = 80) -> str:
-    if not pane:
-        return "tmux pane not configured"
-    try:
-        result = subprocess.run(
-            ["tmux", "capture-pane", "-p", "-t", pane, "-S", f"-{lines}"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        return f"tmux capture failed for {pane}: {exc}"
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout).strip() or f"exit {result.returncode}"
-        return f"tmux capture failed for {pane}: {detail}"
-    return result.stdout or "(empty pane)"
-
-
-def simple_idle(text: str, agent: str) -> bool | None:
-    if not text:
-        return None
-    tail = text[-2500:]
-    if any(marker in tail for marker in ("Running", "Working", "Waiting", "Bash(")):
-        return False
-    if agent == "codex":
-        return bool(re.search(r"(?m)^›\s", tail))
-    return "❯" in tail or "accept edits on" in tail
+def agent_states(project: Project) -> dict[str, Any]:
+    runner = project.runner()
+    out: dict[str, Any] = {}
+    for agent in ("claude", "codex"):
+        try:
+            out[agent] = runner.status(agent)
+        except (OSError, subprocess.SubprocessError) as exc:
+            out[agent] = {"driver": project.driver, "error": str(exc), "idle": None}
+    return out
 
 
 def scan_project(project: Project, meta: dict[str, Any]) -> dict[str, Any]:
@@ -291,10 +295,8 @@ def scan_project(project: Project, meta: dict[str, Any]) -> dict[str, Any]:
             "processedDoneFiles": flow.get("processed_done_files") or [],
         },
         "git": {"branch": branch, "head": head, "dirty": dirty},
-        "agents": {
-            "claude": {"pane": project.claude_pane, "idle": simple_idle(pane_tail(project.claude_pane, 40), "claude")},
-            "codex": {"pane": project.codex_pane, "idle": simple_idle(pane_tail(project.codex_pane, 40), "codex")},
-        },
+        "driver": project.driver,
+        "agents": agent_states(project),
         "meta": {
             "archived": bool(meta.get("archived")),
             "hidden": bool(meta.get("hidden")) or auto_hidden,
@@ -331,7 +333,14 @@ def run_project_command(project: Project, command: str) -> dict[str, Any]:
     script = project.root / project.hermes_script
     if not script.exists():
         raise FileNotFoundError(f"Hermes script not found: {script}")
-    result = run_cmd([str(script), "--command", command], project.root, timeout=30)
+    env = dict(os.environ)
+    env["HERMES_ROOT"] = str(project.root)
+    env.setdefault("PEV_DRIVER", project.driver)
+    if project.claude_pane:
+        env.setdefault("HERMES_CLAUDE_PANE", project.claude_pane)
+    if project.codex_pane:
+        env.setdefault("HERMES_CODEX_PANE", project.codex_pane)
+    result = run_cmd([str(script), "--command", command], project.root, timeout=30, env=env)
     append_event(project, "dashboard_command", {"command": command, "returncode": result.returncode})
     return {"returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
 
@@ -369,6 +378,85 @@ def create_done(project: Project, payload: dict[str, Any]) -> dict[str, Any]:
         {"cycle": done["cycle"], "pass": done["pass"], "kind": done["kind"], "path": rel},
     )
     return {"path": rel, "done": done}
+
+
+INIT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+
+
+def start_init_job(body: dict[str, Any]) -> dict[str, Any]:
+    if PEVCTL_PATH is None:
+        raise FileNotFoundError("pevctl.py not found next to dashboard")
+    name = str(body.get("name") or "").strip()
+    if not INIT_NAME_RE.fullmatch(name):
+        raise ValueError("Invalid project name (use lowercase letters, digits, . _ -)")
+    source = str(body.get("source") or "new")
+    if source not in {"new", "clone", "local"}:
+        raise ValueError("source must be new|clone|local")
+    driver = str(body.get("driver") or "headless")
+    if driver not in {"headless", "tmux"}:
+        raise ValueError("driver must be headless|tmux")
+    argv = [sys.executable, str(PEVCTL_PATH), "init", name,
+            "--source", source, "--driver", driver, "--json",
+            "--projects-file", str(PROJECTS_PATH)]
+    if body.get("repo"):
+        argv += ["--repo", str(body["repo"])]
+    if body.get("dest"):
+        argv += ["--dest", str(body["dest"])]
+    if body.get("stack"):
+        argv += ["--stack", str(body["stack"])]
+    if body.get("displayName"):
+        argv += ["--display-name", str(body["displayName"])]
+    if body.get("visibility") in {"private", "public"}:
+        argv += ["--visibility", str(body["visibility"])]
+    if body.get("claudeModel"):
+        argv += ["--claude-model", str(body["claudeModel"])]
+    if body.get("noPush"):
+        argv += ["--no-push"]
+    job_id = f"{name}-{int(time.time())}"
+    INIT_JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = INIT_JOBS_DIR / f"{job_id}.jsonl"
+    with log_path.open("w", encoding="utf-8") as log_fh:
+        proc = subprocess.Popen(
+            argv, stdout=log_fh, stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL, start_new_session=True, cwd=str(Path.home()),
+        )
+    write_json(INIT_JOBS_DIR / f"{job_id}.meta.json", {
+        "job": job_id, "name": name, "pid": proc.pid, "startedAt": utc_now(),
+        "source": source, "driver": driver,
+    })
+    return {"job": job_id}
+
+
+def init_job_status(job_id: str) -> dict[str, Any]:
+    meta_path = INIT_JOBS_DIR / f"{job_id}.meta.json"
+    if not meta_path.exists():
+        raise FileNotFoundError(f"Unknown init job: {job_id}")
+    meta = read_json(meta_path, {})
+    steps: list[dict[str, Any]] = []
+    summary: dict[str, Any] | None = None
+    log_path = INIT_JOBS_DIR / f"{job_id}.jsonl"
+    for raw in read_text(log_path).splitlines():
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            line = json.loads(raw)
+        except json.JSONDecodeError:
+            steps.append({"step": "output", "detail": raw[:300], "ok": True})
+            continue
+        if "summary" in line:
+            summary = line["summary"]
+        else:
+            steps.append(line)
+    pid = meta.get("pid")
+    running = False
+    if isinstance(pid, int):
+        try:
+            os.kill(pid, 0)
+            running = True
+        except (OSError, ProcessLookupError):
+            running = False
+    return {"job": job_id, "meta": meta, "running": running, "steps": steps, "summary": summary}
 
 
 def project_cycle_tags(meta: dict[str, Any]) -> dict[str, str]:
@@ -500,6 +588,13 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self.send_json({"ok": True, "metrics": data, "updatedAt": utc_now()})
             return
+        match = re.fullmatch(r"/api/init/([^/]+)", path)
+        if match:
+            try:
+                self.send_json({"ok": True, **init_job_status(unquote(match.group(1)))})
+            except (OSError, ValueError) as err:
+                self.send_error_json(str(err), 404)
+            return
         match = re.fullmatch(r"/api/projects/([^/]+)/tail", path)
         if match:
             project = project_by_id(unquote(match.group(1)))
@@ -507,14 +602,27 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error_json("Unknown project", 404)
                 return
             target = parse_qs(parsed.query).get("target", ["claude"])[0]
-            pane = project.claude_pane if target == "claude" else project.codex_pane if target == "codex" else None
-            self.send_json({"ok": True, "target": target, "tail": pane_tail(pane, 120)})
+            if target not in ("claude", "codex"):
+                self.send_error_json("Unknown target", 400)
+                return
+            try:
+                tail = project.runner().tail(target, 120)
+            except (OSError, subprocess.SubprocessError) as exc:
+                tail = f"tail failed: {exc}"
+            self.send_json({"ok": True, "target": target, "tail": tail})
             return
         self.send_error(HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
+        if path == "/api/projects/init":
+            try:
+                result = start_init_job(self.read_body())
+                self.send_json({"ok": True, **result})
+            except (OSError, ValueError, json.JSONDecodeError) as err:
+                self.send_error_json(str(err), 400)
+            return
         tag_match = re.fullmatch(r"/api/projects/([^/]+)/cycles/(\d+)/tag", path)
         if tag_match:
             project = project_by_id(unquote(tag_match.group(1)))
@@ -548,7 +656,7 @@ class Handler(BaseHTTPRequestHandler):
             except (OSError, ValueError, json.JSONDecodeError) as err:
                 self.send_error_json(str(err), 400)
             return
-        match = re.fullmatch(r"/api/projects/([^/]+)/(command|meta|done)", path)
+        match = re.fullmatch(r"/api/projects/([^/]+)/(command|meta|done|agent)", path)
         if not match:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
@@ -559,6 +667,19 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             body = self.read_body()
+            if action == "agent":
+                agent = str(body.get("agent") or "")
+                op = str(body.get("op") or "")
+                runner = project.runner()
+                if op == "harvest":
+                    result: Any = runner.harvest()
+                elif op in {"start", "stop"} and agent in ("claude", "codex"):
+                    result = getattr(runner, op)(agent)
+                else:
+                    raise ValueError("Unknown agent operation")
+                append_event(project, "dashboard_agent", {"agent": agent, "op": op})
+                self.send_json({"ok": True, "result": result})
+                return
             if action == "command":
                 result = run_project_command(project, str(body.get("command") or ""))
                 self.send_json({"ok": True, "result": result})

@@ -7,6 +7,7 @@ This repo is a packaging layer. It contains portable scripts/dashboard files fro
 ## Start Here
 
 - Human/operator/agent runbook: [`docs/RUNBOOK.md`](docs/RUNBOOK.md)
+- Metrics & self-improvement lab implementation plan: [`docs/METRICS_LAB_PLAN.md`](docs/METRICS_LAB_PLAN.md)
 - Template bundle guide: [`templates/multi-agent-artifact/README.md`](templates/multi-agent-artifact/README.md)
 - Hook registration details: [`templates/multi-agent-artifact/HOOKS_REGISTRATION.md`](templates/multi-agent-artifact/HOOKS_REGISTRATION.md)
 
@@ -19,8 +20,10 @@ If you are an agent asked to set up PEV from this README, open and follow `docs/
 - `docs/RUNBOOK.md`
   - first-stop operating guide for humans, Claude, and Codex.
 - `scripts/`
-  - `ensure-pev-tmux.sh`: creates stable tmux sessions for Claude and Codex.
-  - `hermes-cycle-bot.py`: Telegram/Hermes bridge for `/tail`, `/say`, `/implement`, `/fix`, `/review`, `/recheck`, `/merge`, and flow commands.
+  - `pev_runner.py`: agent session runner — `tmux` driver (panes) or `headless` driver (`claude -p --resume` / `codex exec resume`; session IDs persist in `logs/pev-sessions.json`, so projects stop/resume across reboots without tmux).
+  - `pevctl.py`: `init` bootstraps a project end to end — create/clone/adopt a git repo, inject artifacts, optionally tailor AGENTS.md, commit/push, register in the dashboard.
+  - `ensure-pev-tmux.sh`: creates stable tmux sessions for Claude and Codex (tmux driver only).
+  - `hermes-cycle-bot.py`: Telegram/Hermes bridge for `/tail`, `/say`, `/implement`, `/fix`, `/review`, `/recheck`, `/merge`, and flow commands; agent I/O goes through `pev_runner.py`.
   - `claude-auto-responder.py`: watches Claude's tmux pane for approval prompts and idle notifications.
   - `claude-auto-confirm.py`, `telegram-claude-check.py`: older helper scripts kept for reference.
 - `dashboard/`

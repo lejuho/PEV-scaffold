@@ -13,11 +13,44 @@
         <h1>PEV Dashboard</h1>
       </div>
       <div class="top-actions">
+        <button id="themeToggle" type="button" class="language-toggle" aria-label="Toggle theme">◐</button>
         <button id="languageToggle" type="button" class="language-toggle" aria-label="Toggle language">KO</button>
         <button id="refresh" type="button">Refresh</button>
+        <button id="newProject" type="button" class="good">＋ New</button>
         <label class="toggle"><input id="showArchived" type="checkbox" /> <span id="showArchivedLabel">Show archived/hidden</span></label>
       </div>
     </header>
+
+    <dialog id="initDialog" class="init-dialog">
+      <form id="initForm" method="dialog">
+        <h2 id="initTitle">New Project</h2>
+        <label class="field"><span id="fName">Name (id)</span>
+          <input name="name" required pattern="[a-z0-9][a-z0-9._-]*" placeholder="my-project" /></label>
+        <label class="field"><span id="fSource">Source</span>
+          <select name="source">
+            <option value="new">New GitHub repo (gh create + clone)</option>
+            <option value="clone">Clone existing remote</option>
+            <option value="local">Existing local directory</option>
+          </select></label>
+        <label class="field" data-init-field="repo"><span id="fRepo">Repo URL / name</span>
+          <input name="repo" placeholder="https://github.com/me/repo.git" /></label>
+        <label class="field"><span id="fDest">Directory</span>
+          <input name="dest" placeholder="/home/pi/my-project (default: ~/name)" /></label>
+        <label class="field"><span id="fDriver">Driver</span>
+          <select name="driver">
+            <option value="headless">headless (no tmux, resumable sessions)</option>
+            <option value="tmux">tmux (interactive panes)</option>
+          </select></label>
+        <label class="field" data-init-field="visibility"><span id="fVisibility">Visibility</span>
+          <select name="visibility"><option value="private">private</option><option value="public">public</option></select></label>
+        <label class="field"><span id="fStack">Stack (1 line, optional)</span>
+          <input name="stack" placeholder="FastAPI + SQLite + React PWA" /></label>
+        <div class="init-actions">
+          <button type="button" id="initCancel">Cancel</button>
+          <button type="submit" class="good" id="initSubmit">Create</button>
+        </div>
+      </form>
+    </dialog>
 
     <main>
       <section id="projects" class="projects"></section>

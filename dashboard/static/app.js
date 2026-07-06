@@ -11,6 +11,11 @@ const sendTargetEl = document.querySelector("#sendTarget");
 const sendMessageEl = document.querySelector("#sendMessage");
 const sendButtonEl = document.querySelector("#sendButton");
 const quickbarEl = document.querySelector("#quickbar");
+const themeToggleBtn = document.querySelector("#themeToggle");
+const newProjectBtn = document.querySelector("#newProject");
+const initDialog = document.querySelector("#initDialog");
+const initForm = document.querySelector("#initForm");
+const initCancelBtn = document.querySelector("#initCancel");
 
 let projects = [];
 const compactMedia = window.matchMedia("(max-width: 620px)");
@@ -144,6 +149,24 @@ const copy = {
     metaBanner: "Meta-cycle suggested — retro PEV against itself.",
     metaCopy: "📋 Copy meta-cycle prompt",
     metaCopied: "Meta-cycle prompt copied to clipboard.",
+    newProject: "＋ New",
+    ctaEscalated: "⚠ Needs decision",
+    ctaEscalatedDesc: "escalated — open Claude tail",
+    ctaBusy: "⏳ Working…",
+    ctaBusyDesc: "open live output",
+    ctaPrepareNext: "🗺 Prepare next cycle",
+    ctaPrepareNextDesc: "ask Codex for a plan",
+    moreActions: "All actions",
+    confirmMerge: "Send /merge? This asks Codex to merge the cycle branch.",
+    startAgent: "▶ Start",
+    stopAgent: "■ Stop",
+    startAgentDesc: "start/resume session",
+    stopAgentDesc: "stop current turn/pane",
+    initTitle: "New Project",
+    initRunning: "Bootstrapping project…",
+    initDone: "Project ready.",
+    initFailed: "Bootstrap failed — see steps above.",
+    themeAria: "Toggle light/dark theme",
   },
   ko: {
     refresh: "새로고침",
@@ -268,6 +291,24 @@ const copy = {
     metaBanner: "메타 사이클 제안 — PEV 자체를 회고할 시점입니다.",
     metaCopy: "📋 메타 사이클 프롬프트 복사",
     metaCopied: "메타 사이클 프롬프트를 클립보드에 복사했습니다.",
+    newProject: "＋ 새 프로젝트",
+    ctaEscalated: "⚠ 판단 필요",
+    ctaEscalatedDesc: "escalated — Claude 화면 확인",
+    ctaBusy: "⏳ 작업 중…",
+    ctaBusyDesc: "실시간 출력 보기",
+    ctaPrepareNext: "🗺 다음 사이클 준비",
+    ctaPrepareNextDesc: "Codex에게 plan 요청",
+    moreActions: "전체 동작",
+    confirmMerge: "/merge를 보낼까요? Codex에게 사이클 브랜치 병합을 요청합니다.",
+    startAgent: "▶ 시작",
+    stopAgent: "■ 중단",
+    startAgentDesc: "세션 시작/재개",
+    stopAgentDesc: "현재 턴/pane 중단",
+    initTitle: "새 프로젝트",
+    initRunning: "프로젝트 부트스트랩 중…",
+    initDone: "프로젝트 준비 완료.",
+    initFailed: "부트스트랩 실패 — 위 단계를 확인하세요.",
+    themeAria: "라이트/다크 테마 전환",
   },
 };
 
@@ -275,11 +316,39 @@ function t(key) {
   return copy[language]?.[key] || copy.en[key] || key;
 }
 
+/* ── theme (해도 light ↔ 반전 dark, VS Code식 토글) ── */
+let theme = localStorage.getItem("pevTheme") || "";
+const darkMedia = window.matchMedia("(prefers-color-scheme: dark)");
+
+function effectiveTheme() {
+  return theme || (darkMedia.matches ? "dark" : "light");
+}
+
+function applyTheme() {
+  if (theme) {
+    document.documentElement.dataset.theme = theme;
+  } else {
+    delete document.documentElement.dataset.theme;
+  }
+  const dark = effectiveTheme() === "dark";
+  themeToggleBtn.textContent = dark ? "☀" : "☾";
+  themeToggleBtn.setAttribute("aria-label", t("themeAria"));
+  let meta = document.querySelector('meta[name="theme-color"]');
+  if (!meta) {
+    meta = document.createElement("meta");
+    meta.name = "theme-color";
+    document.head.appendChild(meta);
+  }
+  meta.content = dark ? "#131C21" : "#E9EFEA";
+}
+
 function renderStaticText() {
   document.documentElement.lang = language;
   languageToggleBtn.textContent = language === "ko" ? "EN" : "KO";
   languageToggleBtn.setAttribute("aria-label", language === "ko" ? "Switch to English" : "한국어로 전환");
   refreshBtn.textContent = t("refresh");
+  newProjectBtn.textContent = t("newProject");
+  document.querySelector("#initTitle").textContent = t("initTitle");
   showArchivedLabelEl.textContent = t("showArchived");
   consoleTitleEl.textContent = t("console");
   sendMessageEl.placeholder = t("sendPlaceholder");
@@ -322,9 +391,24 @@ function value(v) {
   return v === null || v === undefined || v === "" ? "-" : String(v);
 }
 
+function triageRank(p) {
+  if (p.phase === "escalated") return 0;
+  if (p.phase === "review_blocked") return 1;
+  if (p.pendingDone) return 2;
+  if (p.phase === "ready_to_merge") return 3;
+  if (p.phase === "in_progress") return 4;
+  return 5;
+}
+
 function visibleProjects() {
   const showArchived = showArchivedEl.checked;
-  return projects.filter((p) => showArchived || (!p.meta.archived && !p.meta.hidden));
+  return projects
+    .filter((p) => showArchived || (!p.meta.archived && !p.meta.hidden))
+    .slice()
+    .sort((a, b) =>
+      (b.meta.pinned - a.meta.pinned) ||
+      (triageRank(a) - triageRank(b)) ||
+      String(a.name).localeCompare(String(b.name)));
 }
 
 function sectionKey(project, title) {
@@ -332,7 +416,50 @@ function sectionKey(project, title) {
 }
 
 function isSectionCollapsed(project, title) {
-  return compactMedia.matches && !expandedSections.has(sectionKey(project, title));
+  return !expandedSections.has(sectionKey(project, title));
+}
+
+/* phase가 결정하는 카드당 주 액션 하나 */
+function primaryAction(p) {
+  const claudeBusy = p.agents?.claude?.idle === false;
+  const codexBusy = p.agents?.codex?.idle === false;
+  if (p.phase === "escalated") {
+    return { kind: "tail", target: "claude", cls: "bad", label: t("ctaEscalated"), desc: t("ctaEscalatedDesc") };
+  }
+  if (claudeBusy || codexBusy) {
+    const target = claudeBusy ? "claude" : "codex";
+    return { kind: "tail", target, cls: "neutral", label: t("ctaBusy"), desc: `${target} · ${t("ctaBusyDesc")}` };
+  }
+  if (p.phase === "ready_to_merge") {
+    return { kind: "command", command: "/merge", cls: "good", label: `🔀 ${t("merge")}`, desc: t("mergeDesc") };
+  }
+  if (p.pendingDone) {
+    const cmd = p.latestReview ? "/recheck" : "/review";
+    const label = p.latestReview ? t("recheck") : t("review");
+    return { kind: "command", command: cmd, cls: "good", label: `🔎 ${label}`, desc: t("reviewDesc") };
+  }
+  if (p.phase === "review_blocked") {
+    return { kind: "command", command: "/fix", cls: "", label: `🧩 ${t("fix")}`, desc: t("fixDesc") };
+  }
+  if (p.phase === "in_progress") {
+    return { kind: "command", command: "/implement", cls: "", label: `🛠 ${t("implement")}`, desc: t("implementDesc") };
+  }
+  return { kind: "command", command: "/prepare_next", cls: "neutral", label: t("ctaPrepareNext"), desc: t("ctaPrepareNextDesc") };
+}
+
+function ctaRow(p) {
+  const action = primaryAction(p);
+  const attrs = action.kind === "tail"
+    ? `data-action="tail" data-project="${p.id}" data-target="${action.target}"`
+    : `data-action="command" data-project="${p.id}" data-command="${action.command}"`;
+  return `
+    <div class="cta-row">
+      <button type="button" class="cta-btn ${action.cls}" ${attrs}>
+        <span class="btn-title">${action.label}</span>
+        <span class="btn-desc">${action.desc}</span>
+      </button>
+      <button type="button" class="cta-more" data-action="toggle-all" data-project="${p.id}" title="${t("moreActions")}" aria-label="${t("moreActions")}">⋯</button>
+    </div>`;
 }
 
 function agentState(agent) {
@@ -662,11 +789,12 @@ function render() {
       <article class="card${hiddenClass}" data-project-card="${p.id}">
         <div class="card-head">
           <div>
-            <div class="title">${p.meta.pinned ? "★ " : ""}${p.name}</div>
+            <div class="title">${p.meta.pinned ? "★ " : ""}${p.name}<span class="driver-chip">${p.driver || "tmux"}</span></div>
             <div class="root">${p.root}</div>
           </div>
           ${phaseBadge(p.phase)}
         </div>
+        ${ctaRow(p)}
         <div class="grid">
           <div class="kv"><span class="k">${t("cycle")}</span><span class="v">${value(p.cycle)}</span></div>
           <div class="kv"><span class="k">${t("verdict")}</span><span class="v">${value(p.verdict)}</span></div>
@@ -709,6 +837,18 @@ function render() {
             </button>
             ${commandButton(p, t("enterClaude"), "/enter claude", t("enterDesc"))}
             ${commandButton(p, t("enterCodex"), "/enter codex", t("enterDesc"))}
+            <button type="button" class="action-btn" data-action="agent" data-project="${p.id}" data-agent="claude" data-op="start">
+              <span class="btn-title">${t("startAgent")} Claude</span><span class="btn-desc">${t("startAgentDesc")}</span>
+            </button>
+            <button type="button" class="action-btn danger" data-action="agent" data-project="${p.id}" data-agent="claude" data-op="stop">
+              <span class="btn-title">${t("stopAgent")} Claude</span><span class="btn-desc">${t("stopAgentDesc")}</span>
+            </button>
+            <button type="button" class="action-btn" data-action="agent" data-project="${p.id}" data-agent="codex" data-op="start">
+              <span class="btn-title">${t("startAgent")} Codex</span><span class="btn-desc">${t("startAgentDesc")}</span>
+            </button>
+            <button type="button" class="action-btn danger" data-action="agent" data-project="${p.id}" data-agent="codex" data-op="stop">
+              <span class="btn-title">${t("stopAgent")} Codex</span><span class="btn-desc">${t("stopAgentDesc")}</span>
+            </button>
           `)}
           ${section(p, t("projectView"), t("projectViewDesc"), `
             ${p.meta.archived ? metaButton(p, t("unarchive"), "unarchive", t("unarchiveDesc")) : metaButton(p, t("archive"), "archive", t("archiveDesc"))}
@@ -903,7 +1043,30 @@ async function handleAction(button) {
     render();
     return;
   }
-  if (button.dataset.action === "command") await runCommand(project, button.dataset.command);
+  if (button.dataset.action === "toggle-all") {
+    const proj = projects.find((p) => p.id === project);
+    const titles = [t("flowMode"), t("cycleStep"), t("agentPane"), t("projectView")];
+    const keys = titles.map((title) => sectionKey(proj || { id: project }, title));
+    const anyOpen = keys.some((key) => expandedSections.has(key));
+    keys.forEach((key) => (anyOpen ? expandedSections.delete(key) : expandedSections.add(key)));
+    render();
+    return;
+  }
+  if (button.dataset.action === "agent") {
+    const body = await api(`/api/projects/${encodeURIComponent(project)}/agent`, {
+      method: "POST",
+      body: JSON.stringify({ agent: button.dataset.agent, op: button.dataset.op }),
+    });
+    log(typeof body.result === "string" ? body.result : body.result);
+    await load();
+    return;
+  }
+  if (button.dataset.action === "command") {
+    const command = button.dataset.command;
+    if (command === "/merge" && !window.confirm(t("confirmMerge"))) return;
+    await runCommand(project, command);
+    return;
+  }
   if (button.dataset.action === "meta") await updateMeta(project, button.dataset.op);
   if (button.dataset.action === "tail") {
     const body = await api(`/api/projects/${encodeURIComponent(project)}/tail?target=${encodeURIComponent(button.dataset.target)}`);
@@ -962,6 +1125,75 @@ if (compactMedia.addEventListener) {
 } else {
   compactMedia.addListener(render);
 }
+
+/* ── theme wiring ── */
+themeToggleBtn.addEventListener("click", () => {
+  theme = effectiveTheme() === "dark" ? "light" : "dark";
+  localStorage.setItem("pevTheme", theme);
+  applyTheme();
+});
+if (darkMedia.addEventListener) darkMedia.addEventListener("change", applyTheme);
+
+/* ── New Project 위저드 ── */
+function formatInitStep(s) {
+  return `${s.ok === false ? "✗" : "✓"} ${s.step}${s.detail ? ` — ${s.detail}` : ""}`;
+}
+
+async function pollInitJob(job) {
+  const started = Date.now();
+  const poll = async () => {
+    let status;
+    try {
+      status = await api(`/api/init/${encodeURIComponent(job)}`);
+    } catch (err) {
+      log(`ERROR: ${err.message}`);
+      return;
+    }
+    const lines = [t("initRunning"), "", ...status.steps.map(formatInitStep)];
+    if (!status.running) {
+      if (status.summary && status.summary.ok) {
+        lines[0] = `${t("initDone")} (${status.summary.root})`;
+        lines.push("", ...(status.summary.next || []));
+      } else {
+        lines[0] = t("initFailed");
+      }
+      log(lines.join("\n"));
+      await load();
+      return;
+    }
+    log(lines.join("\n"));
+    if (Date.now() - started < 20 * 60 * 1000) setTimeout(poll, 2000);
+  };
+  poll();
+}
+
+newProjectBtn.addEventListener("click", () => initDialog.showModal());
+initCancelBtn.addEventListener("click", () => initDialog.close());
+initForm.querySelector('[name="source"]').addEventListener("change", (event) => {
+  const source = event.target.value;
+  initForm.querySelector('[data-init-field="repo"]').style.display = source === "new" ? "none" : "";
+  initForm.querySelector('[data-init-field="visibility"]').style.display = source === "new" ? "" : "none";
+});
+initForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const data = Object.fromEntries(new FormData(initForm).entries());
+  const body = {};
+  for (const [key, value] of Object.entries(data)) {
+    if (String(value).trim()) body[key] = String(value).trim();
+  }
+  try {
+    const res = await api("/api/projects/init", { method: "POST", body: JSON.stringify(body) });
+    initDialog.close();
+    log(`${t("initRunning")} (job ${res.job})`);
+    pollInitJob(res.job);
+  } catch (err) {
+    log(`ERROR: ${err.message}`);
+  }
+});
+
 renderStaticText();
+applyTheme();
 load().catch((err) => log(`ERROR: ${err.message}`));
-setInterval(() => load().catch(() => {}), 5000);
+setInterval(() => {
+  if (document.visibilityState === "visible") load().catch(() => {});
+}, 5000);

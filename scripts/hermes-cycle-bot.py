@@ -14,6 +14,13 @@ from pathlib import Path
 from typing import Any
 from urllib import error, parse, request
 
+for _candidate in (Path(__file__).resolve().parent, Path("/home/pi/PEV-scaffold/scripts")):
+    if (_candidate / "pev_runner.py").exists():
+        if str(_candidate) not in sys.path:
+            sys.path.insert(0, str(_candidate))
+        break
+from pev_runner import AgentRunner, RunnerConfig  # noqa: E402
+
 
 VERDICTS = ("BLOCKED", "PASS", "READY_TO_MERGE")
 EXECUTOR_DONE_RE = re.compile(r"pass-(\d+)-done\.json")
@@ -51,6 +58,7 @@ class Config:
     submit_key: str
     submit_delay: float
     dry_run: bool
+    driver: str = "tmux"
 
 
 @dataclass
@@ -102,6 +110,7 @@ def config_from_env(args: argparse.Namespace) -> Config:
         submit_key=os.environ.get("HERMES_SUBMIT_KEY", "C-m"),
         submit_delay=float(os.environ.get("HERMES_SUBMIT_DELAY", "0.35")),
         dry_run=args.dry_run,
+        driver=os.environ.get("PEV_DRIVER", "tmux").strip() or "tmux",
     )
 
 
@@ -521,91 +530,60 @@ def get_updates(cfg: Config, once: bool) -> list[dict[str, Any]]:
     return updates
 
 
-def capture_pane(cfg: Config, pane: str, lines: int = 80) -> str:
-    if not pane:
-        return "pane not configured"
-    result = run_cmd(["tmux", "capture-pane", "-p", "-t", pane, "-S", f"-{lines}"], cfg.root)
-    if result.returncode != 0:
-        return result.stderr.strip() or "tmux capture failed"
-    return result.stdout.strip()[-3500:] or "(empty pane)"
+# --- agent I/O layer -------------------------------------------------------
+# All agent interaction goes through pev_runner (tmux or headless driver).
+# Agents are addressed by name ("claude" / "codex"), no longer by pane string.
+
+_runner: AgentRunner | None = None
 
 
-def pane_label(cfg: Config, pane: str) -> str:
-    if pane == cfg.claude_pane:
-        return "Claude"
-    if pane == cfg.codex_pane:
-        return "Codex"
-    return pane or "unknown"
+def get_runner(cfg: Config) -> AgentRunner:
+    global _runner
+    if _runner is None or _runner.cfg.dry_run != cfg.dry_run:
+        rc = RunnerConfig.from_env(cfg.root, dry_run=cfg.dry_run)
+        rc.root = cfg.root
+        rc.log_dir = cfg.log_dir
+        rc.driver = cfg.driver
+        _runner = AgentRunner(rc)
+    return _runner
 
 
-def submit_pane(cfg: Config, pane: str, label: str | None = None, delay: bool = True) -> str:
-    if not pane:
-        return "pane not configured"
-    target = label or pane_label(cfg, pane)
-    if cfg.dry_run:
-        return f"[dry-run] {target}에 Enter 전송 예정 ({cfg.submit_key})"
-    if delay and cfg.submit_delay > 0:
-        time.sleep(cfg.submit_delay)
-    run_cmd(["tmux", "send-keys", "-t", pane, cfg.submit_key], cfg.root, check=True)
-    return f"{target}에 Enter 전송 완료 ({cfg.submit_key})"
+def capture_pane(cfg: Config, agent: str, lines: int = 80) -> str:
+    if agent not in ("claude", "codex"):
+        return "agent not configured"
+    return get_runner(cfg).tail(agent, lines).strip()[-3500:] or "(empty)"
 
 
-def paste_to_pane(cfg: Config, pane: str, text: str, label: str | None = None) -> str:
-    if not pane:
-        return "pane not configured"
-    target = label or pane_label(cfg, pane)
-    if cfg.dry_run:
-        return f"[dry-run] {target}에 텍스트 붙여넣기 후 Enter 전송 예정: {text}"
-    run_cmd(["tmux", "set-buffer", "--", text], cfg.root, check=True)
-    run_cmd(["tmux", "paste-buffer", "-t", pane], cfg.root, check=True)
-    submit_pane(cfg, pane, target, delay=True)
-    return f"{target}에 텍스트 붙여넣기 + Enter 전송 완료: {text}"
+def pane_label(cfg: Config, agent: str) -> str:
+    return {"claude": "Claude", "codex": "Codex"}.get(agent, agent or "unknown")
+
+
+def submit_pane(cfg: Config, agent: str, label: str | None = None, delay: bool = True) -> str:
+    if agent not in ("claude", "codex"):
+        return "agent not configured"
+    return get_runner(cfg).press_enter(agent, delay)
+
+
+def paste_to_pane(cfg: Config, agent: str, text: str, label: str | None = None) -> str:
+    if agent not in ("claude", "codex"):
+        return "agent not configured"
+    target = label or pane_label(cfg, agent)
+    reply = get_runner(cfg).send(agent, text)
+    return f"{target}: {reply}" if not reply.startswith(agent) else f"{target} — {reply.split(': ', 1)[-1]}"
 
 
 def pane_for(cfg: Config, target: str) -> str:
-    if target == "claude":
-        return cfg.claude_pane
-    if target == "codex":
-        return cfg.codex_pane
-    return ""
+    return target if target in ("claude", "codex") else ""
 
 
-def pane_text(cfg: Config, pane: str, lines: int = 80) -> str:
-    if not pane:
-        return ""
-    result = run_cmd(["tmux", "capture-pane", "-p", "-t", pane, "-S", f"-{lines}"], cfg.root)
-    if result.returncode != 0:
-        return ""
-    return result.stdout
-
-
-def is_claude_idle(text: str) -> bool:
-    if not text:
-        return False
-    tail = text[-2500:]
-    prompt_idx = tail.rfind("❯")
-    current = tail[prompt_idx:] if prompt_idx >= 0 else tail[-800:]
-    working = ["Perusing", "Running", "Working", "Waiting", "Esc to interrupt", "Bash("]
-    if any(marker in current for marker in working):
-        return False
-    idle = ["accept edits on", "❯", "Tip: Use /btw", "? for shortcuts"]
-    return any(marker in current for marker in idle)
-
-
-def is_codex_idle(text: str) -> bool:
-    if not text:
-        return False
-    tail = text[-2500:]
-    working = ["Running", "Working", "thinking", "Thinking", "exec_command", "apply_patch", "Waiting for"]
-    if any(marker in tail for marker in working):
-        return False
-    return bool(re.search(r"(?m)^›\s", tail)) and ("gpt-" in tail or "OpenAI Codex" in tail)
+def agent_idle(cfg: Config, agent: str) -> bool:
+    return bool(get_runner(cfg).idle(agent))
 
 
 def flow_status_text(cfg: Config, state: CycleState) -> str:
     flow = load_flow_state(cfg)
-    claude_idle = is_claude_idle(pane_text(cfg, cfg.claude_pane, lines=40))
-    codex_idle = is_codex_idle(pane_text(cfg, cfg.codex_pane, lines=40))
+    claude_idle = agent_idle(cfg, "claude")
+    codex_idle = agent_idle(cfg, "codex")
     done_pass = expected_done_pass(state)
     pending_done = find_executor_done(cfg, state, done_pass, flow) if done_pass is not None else None
     return "\n".join(
@@ -676,7 +654,7 @@ def flow_send_review(cfg: Config, flow: dict[str, Any], state: CycleState, promp
     key = f"cycle-{state.cycle}:codex:{prompt}"
     if flow.get("last_action_key") == key:
         return "Flow: review command already sent"
-    reply = paste_to_pane(cfg, cfg.codex_pane, prompt, "Codex")
+    reply = paste_to_pane(cfg, "codex", prompt, "Codex")
     flow["waiting_for_review_from"] = state.latest_review
     mark_flow_action(flow, key, "codex_review")
     return reply
@@ -692,7 +670,7 @@ def flow_send_review_for_done(
     key = f"cycle-{state.cycle}:done:{done_rel}:{prompt}"
     if flow.get("last_action_key") == key:
         return "Flow: done file already sent to Codex"
-    reply = paste_to_pane(cfg, cfg.codex_pane, prompt, "Codex")
+    reply = paste_to_pane(cfg, "codex", prompt, "Codex")
     mark_done_processed(flow, done_rel)
     flow["waiting_for_review_from"] = state.latest_review
     mark_flow_action(flow, key, "codex_review")
@@ -711,8 +689,8 @@ def maybe_advance_flow(cfg: Config, state: CycleState, force: bool = False) -> s
         save_flow_state(cfg, flow)
         return None
 
-    claude_idle = is_claude_idle(pane_text(cfg, cfg.claude_pane, lines=80))
-    codex_idle = is_codex_idle(pane_text(cfg, cfg.codex_pane, lines=80))
+    claude_idle = agent_idle(cfg, "claude")
+    codex_idle = agent_idle(cfg, "codex")
     waiting_for = flow.get("waiting_for")
     done_pass = expected_done_pass(state)
     pending_done = find_executor_done(cfg, state, done_pass, flow) if done_pass is not None else None
@@ -826,7 +804,7 @@ def maybe_advance_flow(cfg: Config, state: CycleState, force: bool = False) -> s
             send_flow_notice(cfg, flow, f"{key}:blocked", f"Flow paused: {err}")
             save_flow_state(cfg, flow)
             return err
-        reply = paste_to_pane(cfg, cfg.claude_pane, prompt or "", "Claude")
+        reply = paste_to_pane(cfg, "claude", prompt or "", "Claude")
         mark_flow_action(flow, key, "claude_implement")
         save_flow_state(cfg, flow)
         send_telegram(cfg, f"Flow advanced: implement started\n{reply}")
@@ -848,7 +826,7 @@ def maybe_advance_flow(cfg: Config, state: CycleState, force: bool = False) -> s
                 executor_done_instruction(state.cycle, pass_no, "fix", review),
             ]
         )
-        reply = paste_to_pane(cfg, cfg.claude_pane, prompt, "Claude")
+        reply = paste_to_pane(cfg, "claude", prompt, "Claude")
         mark_flow_action(flow, key, "claude_fix")
         save_flow_state(cfg, flow)
         send_telegram(cfg, f"Flow advanced: fix started\n{reply}")
@@ -867,7 +845,7 @@ def maybe_advance_flow(cfg: Config, state: CycleState, force: bool = False) -> s
             send_flow_notice(cfg, flow, f"{merge_key}:wait", "Flow waiting: Codex is not idle for merge.")
             save_flow_state(cfg, flow)
             return None
-        reply = paste_to_pane(cfg, cfg.codex_pane, "머지하라", "Codex")
+        reply = paste_to_pane(cfg, "codex", "머지하라", "Codex")
         mark_flow_action(flow, merge_key, "codex_merge")
         save_flow_state(cfg, flow)
         send_telegram(cfg, f"Flow advanced: merge requested\n{reply}")
@@ -882,7 +860,7 @@ def maybe_advance_flow(cfg: Config, state: CycleState, force: bool = False) -> s
             save_flow_state(cfg, flow)
             return None
         prompt = "남은 구현 스펙을 판단하고, 가장 적합한 다음 스펙 하나를 추천한 뒤 그 스펙으로 바로 사이클 준비하라."
-        reply = paste_to_pane(cfg, cfg.codex_pane, prompt, "Codex")
+        reply = paste_to_pane(cfg, "codex", prompt, "Codex")
         mark_flow_action(flow, key, "codex_next_cycle")
         save_flow_state(cfg, flow)
         send_telegram(cfg, f"Flow advanced: next-cycle preparation requested\n{reply}")
@@ -1066,18 +1044,18 @@ def handle_command(cfg: Config, text: str, state: CycleState) -> str:
         label = "Codex" if target == "codex" else "Claude" if target == "claude" else target
         return submit_pane(cfg, pane_for(cfg, target), label, delay=False)
     if command == "/remaining":
-        return paste_to_pane(cfg, cfg.codex_pane, "남은 구현 스펙", "Codex")
+        return paste_to_pane(cfg, "codex", "남은 구현 스펙", "Codex")
     if command == "/prepare_next":
-        return paste_to_pane(cfg, cfg.codex_pane, "그것으로 사이클 준비", "Codex")
+        return paste_to_pane(cfg, "codex", "그것으로 사이클 준비", "Codex")
     if command == "/implement":
         prompt, err = build_implement_prompt(cfg, state)
         if err:
             return err
-        return paste_to_pane(cfg, cfg.claude_pane, prompt or "", "Claude")
+        return paste_to_pane(cfg, "claude", prompt or "", "Claude")
     if command == "/review":
-        return paste_to_pane(cfg, cfg.codex_pane, "구현 검증", "Codex")
+        return paste_to_pane(cfg, "codex", "구현 검증", "Codex")
     if command == "/recheck":
-        return paste_to_pane(cfg, cfg.codex_pane, "재검증", "Codex")
+        return paste_to_pane(cfg, "codex", "재검증", "Codex")
     if command == "/fix":
         review = state.latest_review or "latest review"
         prompt_parts = [
@@ -1087,11 +1065,11 @@ def handle_command(cfg: Config, text: str, state: CycleState) -> str:
             pass_no = expected_done_pass(state) or ((review_number(state.latest_review) or 0) + 1)
             prompt_parts.append(executor_done_instruction(state.cycle, pass_no, "fix", state.latest_review))
         prompt = "\n\n".join(prompt_parts)
-        return paste_to_pane(cfg, cfg.claude_pane, prompt, "Claude")
+        return paste_to_pane(cfg, "claude", prompt, "Claude")
     if command == "/merge":
         if state.phase != "ready_to_merge":
             return f"Refused: phase is {state.phase}, not ready_to_merge"
-        return paste_to_pane(cfg, cfg.codex_pane, "머지하라", "Codex")
+        return paste_to_pane(cfg, "codex", "머지하라", "Codex")
     if command == "/flow":
         action = parts[1].lower() if len(parts) >= 2 else "status"
         if action in {"status", "state"}:

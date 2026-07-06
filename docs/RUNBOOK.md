@@ -356,6 +356,54 @@ Write .review/cycle-N/review-vN.md with verdict, findings, sprint contract
 check, automatic checks, and changes outside plan.
 ```
 
+## Drivers: tmux vs headless
+
+Agent I/O goes through `scripts/pev_runner.py`. Two drivers, selected with
+`PEV_DRIVER` in `hermes.env` (or `"driver"` in the dashboard `projects.json`):
+
+- `tmux` (default): original behavior — interactive CLIs in tmux panes.
+- `headless`: no tmux. Every `/implement`, `/fix`, `/say` becomes one
+  background `claude -p --resume <session-id>` / `codex exec resume <id>`
+  invocation. Session IDs persist in `logs/pev-sessions.json`, so a project
+  survives reboots and can be stopped/resumed at any time with full
+  conversation history. Per-turn output lands in `logs/pev-turns/`.
+
+Runner CLI (works standalone):
+
+```bash
+scripts/pev_runner.py --root /path/to/project status
+scripts/pev_runner.py --root /path/to/project send claude "..."
+scripts/pev_runner.py --root /path/to/project tail claude
+scripts/pev_runner.py --root /path/to/project stop claude    # turn stops, session kept
+scripts/pev_runner.py --root /path/to/project harvest        # adopt latest tmux-era sessions
+```
+
+Migrating a tmux project to headless: run `harvest` once (it picks up the most
+recent Claude session for the project directory and the most recent Codex
+session whose cwd matches), then set `PEV_DRIVER=headless`. Headless runs
+inherit no interactive model choice — set `PEV_CLAUDE_MODEL` /
+`PEV_CODEX_MODEL` explicitly in `hermes.env` if the default is wrong.
+
+## Bootstrapping a new project (pevctl)
+
+`scripts/pevctl.py init` automates the whole Target Project Bootstrap section:
+
+```bash
+# new GitHub repo → clone → artifacts → commit → push → dashboard register
+scripts/pevctl.py init myproj --source new --visibility private \
+  --stack "FastAPI + SQLite + React PWA"
+
+# existing remote / existing local directory
+scripts/pevctl.py init myproj --source clone --repo https://github.com/me/myproj.git
+scripts/pevctl.py init myproj --source local --dest /home/pi/myproj
+```
+
+`--stack` runs one `claude -p --model sonnet` call that fills the
+Architecture/Commands/Testing sections of AGENTS.md. Existing files are never
+overwritten (reported as "kept existing" — merge manually). The dashboard has
+the same flow behind the **＋ New** button; progress streams into the console
+panel via `/api/projects/init` + `/api/init/<job>`.
+
 ## Recovery
 
 Empty dashboard tail:
