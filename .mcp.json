@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "pev": {
+      "command": "python3",
+      "args": ["/home/pi/PEV-scaffold/mcp/pev_mcp.py"],
+      "env": {
+        "PEV_PROJECTS": "/home/pi/PEV-dashboard/projects.json",
+        "PEV_STATE": "/home/pi/PEV-dashboard/state.json"
+      }
+    }
+  }
+}
