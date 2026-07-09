@@ -320,13 +320,17 @@ def inject_artifacts(dest: Path, driver: str, log: StepLogger) -> tuple[list[str
         if copy_if_absent(SCRIPT_DIR / script_name, target, copied, skipped):
             make_executable(target)
 
-    # runtime env for the hermes bridge / runner
+    # runtime env for the hermes bridge / runner. Resolve bins to absolute
+    # paths (searching common install dirs, not just this process's PATH) so a
+    # headless service can find them even when launched from a restricted PATH.
+    sys.path.insert(0, str(SCRIPT_DIR))
+    from pev_runner import resolve_bin  # noqa: E402
     env_lines = [
         f"HERMES_ROOT={dest}",
         f"HERMES_LOG_DIR={dest / 'logs'}",
         f"PEV_DRIVER={driver}",
-        f"PEV_CLAUDE_BIN={os.environ.get('PEV_CLAUDE_BIN', shutil.which('claude') or 'claude')}",
-        f"PEV_CODEX_BIN={os.environ.get('PEV_CODEX_BIN', shutil.which('codex') or 'codex')}",
+        f"PEV_CLAUDE_BIN={os.environ.get('PEV_CLAUDE_BIN') or resolve_bin('claude')}",
+        f"PEV_CODEX_BIN={os.environ.get('PEV_CODEX_BIN') or resolve_bin('codex')}",
         "# HERMES_TELEGRAM_TOKEN=",
         "# HERMES_CHAT_ID=",
     ]

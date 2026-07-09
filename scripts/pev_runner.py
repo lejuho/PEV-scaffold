@@ -43,6 +43,38 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
+def extra_bin_dirs() -> list[str]:
+    """Common user-install bin dirs to search when a bare tool name isn't on
+    PATH. Override with PEV_EXTRA_PATH (colon-separated)."""
+    env = os.environ.get("PEV_EXTRA_PATH")
+    if env:
+        return [d for d in env.split(os.pathsep) if d]
+    home = Path.home()
+    return [
+        str(home / ".local" / "bin"),
+        str(home / ".npm-global" / "bin"),
+        "/mnt/data/pi_storage/.npm-global/bin",
+        "/usr/local/bin",
+    ]
+
+
+def resolve_bin(name: str) -> str:
+    """Resolve a CLI binary robustly: an absolute path is trusted as-is;
+    otherwise try PATH, then the extra user-install dirs. Falls back to the
+    bare name so the original 'not found' error still surfaces."""
+    import shutil as _shutil
+    if os.path.isabs(name):
+        return name
+    found = _shutil.which(name)
+    if found:
+        return found
+    for directory in extra_bin_dirs():
+        candidate = Path(directory) / name
+        if candidate.exists():
+            return str(candidate)
+    return name
+
+
 # ---------------------------------------------------------------------------
 # Config
 
@@ -419,7 +451,7 @@ class HeadlessDriver:
         """Return (argv, presetSessionId). presetSessionId is only set when we
         assign the ID ourselves (claude first turn)."""
         if agent == "claude":
-            args = [self.cfg.claude_bin, "-p", text, "--output-format", "stream-json", "--verbose"]
+            args = [resolve_bin(self.cfg.claude_bin), "-p", text, "--output-format", "stream-json", "--verbose"]
             args += shlex.split(self.cfg.claude_headless_args)
             if self.cfg.claude_model:
                 args += ["--model", self.cfg.claude_model]
@@ -431,7 +463,7 @@ class HeadlessDriver:
             args += ["--session-id", new_sid]
             return args, new_sid
         # codex
-        base = [self.cfg.codex_bin, "exec"]
+        base = [resolve_bin(self.cfg.codex_bin), "exec"]
         sid = entry.get("sessionId")
         if sid:
             base += ["resume", str(sid)]
@@ -458,6 +490,9 @@ class HeadlessDriver:
             return f"[dry-run] would run: {' '.join(shlex.quote(a) for a in argv[:8])}..."
         env = dict(os.environ)
         env.setdefault("TERM", "xterm-256color")
+        # Augment PATH so the CLI (and the node/child processes it spawns)
+        # resolve even when launched from a non-login-shell service.
+        env["PATH"] = os.pathsep.join([*extra_bin_dirs(), env.get("PATH", "")])
         with open(log_path, "w", encoding="utf-8") as log_fh:
             proc = subprocess.Popen(
                 argv,
