@@ -252,12 +252,26 @@ class TmuxDriver:
         return subprocess.run(args, cwd=self.cfg.root, capture_output=True, text=True, timeout=timeout, check=check)
 
     # -- interface
+    def _ensure_alive(self, agent: str) -> bool:
+        """True if the tmux session was already alive. If it was gone (reboot,
+        killed), (re)create it and return False so the caller skips writing into
+        a still-booting CLI — the operator/flow resends once it's ready."""
+        session = self._session_name(agent)
+        if not session:
+            return True  # not configured — let the normal path report it
+        if self._run(["tmux", "has-session", "-t", session]).returncode == 0:
+            return True
+        self.start(agent)
+        return False
+
     def send(self, agent: str, text: str) -> str:
         pane = self._pane(agent)
         if not pane:
             return f"{agent}: tmux pane not configured"
         if self.cfg.dry_run:
             return f"[dry-run] would paste to {pane}: {text}"
+        if not self._ensure_alive(agent):
+            return f"{agent}: tmux session (re)created — CLI is booting, resend in a few seconds"
         self._run(["tmux", "set-buffer", "--", text], check=True)
         self._run(["tmux", "paste-buffer", "-t", pane], check=True)
         return self.press_enter(agent)
@@ -268,6 +282,8 @@ class TmuxDriver:
             return f"{agent}: tmux pane not configured"
         if self.cfg.dry_run:
             return f"[dry-run] would press {self.cfg.submit_key} in {pane}"
+        if not self._ensure_alive(agent):
+            return f"{agent}: tmux session (re)created — CLI is booting, resend in a few seconds"
         if delay and self.cfg.submit_delay > 0:
             time.sleep(self.cfg.submit_delay)
         self._run(["tmux", "send-keys", "-t", pane, self.cfg.submit_key], check=True)

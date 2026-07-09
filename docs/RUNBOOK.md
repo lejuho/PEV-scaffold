@@ -384,6 +384,14 @@ session whose cwd matches), then set `PEV_DRIVER=headless`. Headless runs
 inherit no interactive model choice — set `PEV_CLAUDE_MODEL` /
 `PEV_CODEX_MODEL` explicitly in `hermes.env` if the default is wrong.
 
+**tmux self-heal.** With the tmux driver, `init` creates the sessions, and if a
+session later dies (reboot, kill) the next `send`/`enter` **recreates it** and
+returns "CLI is booting, resend in a few seconds" instead of writing into a
+half-booted CLI — resend once (the flow's next tick does this automatically).
+`tail` does not spin up a CLI; it just reports the pane is gone, and the
+dashboard shows `alive:false`. The boot-time `pev-tmux.service` still pre-warms
+sessions so the first real command usually finds them already up.
+
 ## Bootstrapping a new project (pevctl)
 
 `scripts/pevctl.py init` automates the whole Target Project Bootstrap section:
