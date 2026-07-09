@@ -661,6 +661,140 @@ def cmd_context(args: argparse.Namespace) -> int:
     return 0
 
 
+
+# ---------------------------------------------------------------------------
+# teardown
+
+
+def codex_rollouts_for(root: Path) -> list[Path]:
+    """Codex session transcripts recorded with this project as cwd."""
+    sessions = Path.home() / ".codex" / "sessions"
+    hits: list[Path] = []
+    if not sessions.is_dir():
+        return hits
+    for path in sessions.glob("*/*/*/rollout-*.jsonl"):
+        try:
+            with path.open(encoding="utf-8") as fh:
+                first = json.loads(fh.readline())
+        except (OSError, json.JSONDecodeError, ValueError):
+            continue
+        if str((first.get("payload") or {}).get("cwd") or "") == str(root):
+            hits.append(path)
+    return hits
+
+
+def destroy_targets(entry: dict[str, Any], projects_path: Path) -> list[tuple[str, Any]]:
+    """Everything a project leaves behind, in removal order."""
+    name = str(entry["id"])
+    root = Path(str(entry["root"])).expanduser().resolve()
+    targets: list[tuple[str, Any]] = []
+
+    # tmux sessions (derived from configured panes, else <name>-claude/-codex)
+    for key, fallback in (("claudePane", f"{name}-claude"), ("codexPane", f"{name}-codex")):
+        pane = str(entry.get(key) or "")
+        session = pane.split(":", 1)[0] if pane else fallback
+        if session and run(["tmux", "has-session", "-t", session], check=False).returncode == 0:
+            targets.append(("tmux session", session))
+
+    unit = Path.home() / ".config" / "systemd" / "user" / f"{name}.service"
+    if unit.exists():
+        targets.append(("systemd unit", unit))
+
+    if root.is_dir():
+        targets.append(("repo dir", root))
+
+    targets.append(("projects.json entry", projects_path))
+
+    state_path = Path(os.environ.get("PEV_STATE", projects_path.parent / "state.json"))
+    if state_path.exists():
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            if name in (state.get("projects") or {}):
+                targets.append(("dashboard state entry", state_path))
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    jobs_dir = projects_path.parent / "init-jobs"
+    if jobs_dir.is_dir():
+        jobs = [p for p in jobs_dir.iterdir()
+                if p.name.startswith(f"{name}-") or p.name.startswith(f"deploy-{name}-")]
+        for job in jobs:
+            targets.append(("job log", job))
+
+    transcripts = Path.home() / ".claude" / "projects" / str(root).replace("/", "-")
+    if transcripts.is_dir():
+        targets.append(("claude transcripts", transcripts))
+
+    for rollout in codex_rollouts_for(root):
+        targets.append(("codex rollout", rollout))
+
+    return targets
+
+
+def cmd_destroy(args: argparse.Namespace) -> int:
+    log = StepLogger(False)
+    projects_path = projects_file_path(args)
+    projects = load_projects_list(projects_path)
+    entry = next((p for p in projects if p.get("id") == args.name), None)
+    if entry is None:
+        raise SystemExit(f"project {args.name!r} not in {projects_path}")
+
+    root = Path(str(entry["root"])).expanduser().resolve()
+    # Guardrails: never let a bad entry point destroy something important.
+    if root in (Path.home(), Path("/")) or root == SCAFFOLD_ROOT or not str(root).startswith(str(Path.home())):
+        raise SystemExit(f"refusing to destroy suspicious root: {root}")
+
+    targets = destroy_targets(entry, projects_path)
+    if not args.yes:
+        print(f"DRY RUN — would destroy project {args.name!r} (root {root}):")
+        for kind, target in targets:
+            print(f"  - {kind}: {target}")
+        print(f"  - github repo: {args.name} (needs delete_repo scope; see note below)")
+        print("\nRe-run with --yes to execute.")
+        return 0
+
+    for kind, target in targets:
+        try:
+            if kind == "tmux session":
+                run(["tmux", "kill-session", "-t", str(target)], check=False)
+            elif kind == "systemd unit":
+                run(["systemctl", "--user", "disable", "--now", f"{args.name}.service"], check=False)
+                Path(target).unlink(missing_ok=True)
+                run(["systemctl", "--user", "daemon-reload"], check=False)
+            elif kind == "repo dir":
+                if args.keep_dir:
+                    log.log("repo dir kept", str(target)); continue
+                shutil.rmtree(target, ignore_errors=True)
+            elif kind == "projects.json entry":
+                data = json.loads(Path(target).read_text(encoding="utf-8"))
+                data["projects"] = [p for p in data.get("projects", []) if p.get("id") != args.name]
+                Path(target).write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            elif kind == "dashboard state entry":
+                data = json.loads(Path(target).read_text(encoding="utf-8"))
+                (data.get("projects") or {}).pop(args.name, None)
+                Path(target).write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            elif kind in ("job log", "codex rollout"):
+                Path(target).unlink(missing_ok=True)
+            elif kind == "claude transcripts":
+                shutil.rmtree(target, ignore_errors=True)
+            log.log(f"removed {kind}", str(target))
+        except OSError as exc:
+            log.log(f"failed {kind}", f"{target}: {exc}", ok=False)
+
+    if not args.keep_remote:
+        result = run(["gh", "repo", "delete", args.name, "--yes"], check=False)
+        if result.returncode == 0:
+            log.log("github repo deleted", args.name)
+        else:
+            log.log("github repo NOT deleted", "token lacks delete_repo scope — delete it "
+                    f"manually, or: gh auth refresh -h github.com -s delete_repo && "
+                    f"gh repo delete {args.name} --yes", ok=False)
+
+    port = entry.get("port")
+    log.log("done", f"port {port} freed" if port else "done")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="PEV project bootstrap")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -681,6 +815,13 @@ def main() -> int:
     p.add_argument("--no-push", action="store_true")
     p.add_argument("--json", action="store_true", help="stream steps as JSON lines")
 
+    d = sub.add_parser("destroy", help="remove a project and everything it left behind")
+    d.add_argument("name", help="project id as registered in projects.json")
+    d.add_argument("--projects-file", help="dashboard projects.json to read/update")
+    d.add_argument("--yes", action="store_true", help="actually do it (default: dry run)")
+    d.add_argument("--keep-dir", action="store_true", help="leave the local repo directory")
+    d.add_argument("--keep-remote", action="store_true", help="do not attempt to delete the GitHub repo")
+
     c = sub.add_parser("context", help="add or list spec/design context files")
     c.add_argument("action", choices=["add", "list"])
     c.add_argument("--root", required=True, help="project root directory")
@@ -695,6 +836,8 @@ def main() -> int:
     try:
         if args.cmd == "init":
             return cmd_init(args)
+        if args.cmd == "destroy":
+            return cmd_destroy(args)
         if args.cmd == "context":
             if args.action == "add" and not args.category:
                 raise SystemExit("--category is required for 'context add'")

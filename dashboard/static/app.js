@@ -184,6 +184,8 @@ const copy = {
     ctxClose: "Close",
     ctxEmpty: "No context files yet.",
     ctxAdded: "Context file added.",
+    initClaudeModel: "Executor model",
+    initClaudeEffort: "Executor effort",
     initSpec: "Spec (optional)",
     initDesign: "Design system (optional)",
     noSpec: "no spec",
@@ -348,6 +350,8 @@ const copy = {
     ctxClose: "닫기",
     ctxEmpty: "아직 컨텍스트 파일이 없습니다.",
     ctxAdded: "컨텍스트 파일을 추가했습니다.",
+    initClaudeModel: "Executor 모델",
+    initClaudeEffort: "Executor effort",
     initSpec: "명세 (선택)",
     initDesign: "디자인 시스템 (선택)",
     noSpec: "명세 없음",
@@ -399,6 +403,8 @@ function renderStaticText() {
   refreshBtn.textContent = t("refresh");
   newProjectBtn.textContent = t("newProject");
   document.querySelector("#initTitle").textContent = t("initTitle");
+  document.querySelector("#fClaudeModel").textContent = t("initClaudeModel");
+  document.querySelector("#fClaudeEffort").textContent = t("initClaudeEffort");
   document.querySelector("#fInitSpec").textContent = t("initSpec");
   document.querySelector("#fInitDesign").textContent = t("initDesign");
   document.querySelector("#ctxTitle").textContent = t("ctxTitle");

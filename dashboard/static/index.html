@@ -43,6 +43,21 @@
           </select></label>
         <label class="field" data-init-field="visibility"><span id="fVisibility">Visibility</span>
           <select name="visibility"><option value="private">private</option><option value="public">public</option></select></label>
+        <label class="field"><span id="fClaudeModel">Executor model</span>
+          <select name="claudeModel">
+            <option value="sonnet">sonnet (template default)</option>
+            <option value="opus">opus</option>
+            <option value="haiku">haiku</option>
+          </select></label>
+        <label class="field"><span id="fClaudeEffort">Executor effort</span>
+          <select name="claudeEffort">
+            <option value="">(CLI default)</option>
+            <option value="low">low</option>
+            <option value="medium">medium</option>
+            <option value="high">high</option>
+            <option value="xhigh">xhigh</option>
+            <option value="max">max</option>
+          </select></label>
         <label class="field"><span id="fStack">Stack (1 line, optional)</span>
           <input name="stack" placeholder="FastAPI + SQLite + React PWA" /></label>
         <label class="field"><span id="fInitSpec">Spec (optional)</span>

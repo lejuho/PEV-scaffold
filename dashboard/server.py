@@ -480,6 +480,8 @@ def start_init_job(body: dict[str, Any]) -> dict[str, Any]:
         argv += ["--visibility", str(body["visibility"])]
     if body.get("claudeModel"):
         argv += ["--claude-model", str(body["claudeModel"])]
+    if body.get("claudeEffort") in {"low", "medium", "high", "xhigh", "max"}:
+        argv += ["--claude-effort", str(body["claudeEffort"])]
     if body.get("noPush"):
         argv += ["--no-push"]
     job_id = f"{name}-{int(time.time())}"

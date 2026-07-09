@@ -337,6 +337,23 @@ class TmuxDriver:
             return f"tmux capture failed for {pane}: {detail}"
         return result.stdout or "(empty pane)"
 
+    def _launch_command(self, agent: str) -> str:
+        """Shell command the tmux session runs. Model/effort are appended here —
+        without this, PEV_CLAUDE_MODEL / PEV_CLAUDE_EFFORT would be silently
+        ignored on the tmux driver and the CLI would fall back to the
+        operator's default model at its default effort."""
+        if agent == "claude":
+            parts = [resolve_bin(self.cfg.claude_bin), self.cfg.claude_args]
+            if self.cfg.claude_model:
+                parts += ["--model", shlex.quote(self.cfg.claude_model)]
+            if self.cfg.claude_effort:
+                parts += ["--effort", shlex.quote(self.cfg.claude_effort)]
+        else:
+            parts = [resolve_bin(self.cfg.codex_bin), self.cfg.codex_args]
+            if self.cfg.codex_model:
+                parts += ["-m", shlex.quote(self.cfg.codex_model)]
+        return " ".join(p for p in parts if p)
+
     def idle(self, agent: str) -> bool | None:
         text = self.tail(agent, 40)
         if not text or text.startswith("tmux capture failed") or text == "tmux pane not configured":
@@ -361,10 +378,7 @@ class TmuxDriver:
             return f"{agent}: no tmux session configured"
         if self._run(["tmux", "has-session", "-t", session]).returncode == 0:
             return f"{agent}: tmux session {session} already running"
-        if agent == "claude":
-            command = f"{self.cfg.claude_bin} {self.cfg.claude_args}"
-        else:
-            command = f"{self.cfg.codex_bin} {self.cfg.codex_args}"
+        command = self._launch_command(agent)
         if self.cfg.dry_run:
             return f"[dry-run] would create tmux session {session}: {command}"
         self._run(
