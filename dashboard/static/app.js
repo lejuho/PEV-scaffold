@@ -1167,13 +1167,17 @@ async function pollInitJob(job) {
   poll();
 }
 
-newProjectBtn.addEventListener("click", () => initDialog.showModal());
-initCancelBtn.addEventListener("click", () => initDialog.close());
-initForm.querySelector('[name="source"]').addEventListener("change", (event) => {
-  const source = event.target.value;
+function syncInitSourceFields() {
+  const source = initForm.querySelector('[name="source"]').value;
   initForm.querySelector('[data-init-field="repo"]').style.display = source === "new" ? "none" : "";
   initForm.querySelector('[data-init-field="visibility"]').style.display = source === "new" ? "" : "none";
+}
+newProjectBtn.addEventListener("click", () => {
+  syncInitSourceFields();
+  initDialog.showModal();
 });
+initCancelBtn.addEventListener("click", () => initDialog.close());
+initForm.querySelector('[name="source"]').addEventListener("change", syncInitSourceFields);
 initForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const data = Object.fromEntries(new FormData(initForm).entries());
