@@ -299,24 +299,19 @@ class TmuxDriver:
 
     # -- interface
     def _ensure_alive(self, agent: str) -> bool:
-        """True if the tmux session was already alive. If it was gone (reboot,
-        killed), (re)create it and return False so the caller skips writing into
-        a still-booting CLI — the operator/flow resends once it's ready."""
+        """True when the agent CLI is live in its pane and ready for input.
+
+        Otherwise start() brings it back — creating the session if it's gone, or
+        relaunching the CLI if the pane dropped to a bare shell — and we return
+        False so the caller skips writing into a still-booting CLI (pasting into
+        bash would execute the prompt as a shell command). The operator or the
+        flow's next tick resends."""
         session = self._session_name(agent)
         if not session:
             return True  # not configured — let the normal path report it
-        if self._run(["tmux", "has-session", "-t", session]).returncode != 0:
-            self.start(agent)
-            return False
-        if self._cli_running(agent):
+        if self._run(["tmux", "has-session", "-t", session]).returncode == 0 and self._cli_running(agent):
             return True
-        # Session alive but the CLI exited and left a bare shell. Relaunch the
-        # CLI in place rather than pasting the prompt into bash.
-        pane = self._pane(agent)
-        if self.cfg.dry_run:
-            return False
-        self._run(["tmux", "respawn-pane", "-k", "-t", pane,
-                   f"bash -lc {shlex.quote(self._launch_command(agent) + '; exec bash -l')}"])
+        self.start(agent)
         return False
 
     def send(self, agent: str, text: str) -> str:
@@ -441,9 +436,19 @@ class TmuxDriver:
         session = self._session_name(agent)
         if not session:
             return f"{agent}: no tmux session configured"
-        if self._run(["tmux", "has-session", "-t", session]).returncode == 0:
-            return f"{agent}: tmux session {session} already running"
         command = self._launch_command(agent)
+        if self._run(["tmux", "has-session", "-t", session]).returncode == 0:
+            if self._cli_running(agent):
+                return f"{agent}: tmux session {session} already running"
+            # Session alive but the CLI exited and left a bare shell. `has-session`
+            # alone would report "already running" and never revive it, so relaunch
+            # the CLI in place. Safe: we only get here when no CLI owns the pane.
+            pane = self._pane(agent)
+            if self.cfg.dry_run:
+                return f"[dry-run] would relaunch CLI in {pane}: {command}"
+            self._run(["tmux", "respawn-pane", "-k", "-t", pane,
+                       f"bash -lc {shlex.quote(command + '; exec bash -l')}"])
+            return f"{agent}: CLI relaunched in existing tmux session {session}"
         if self.cfg.dry_run:
             return f"[dry-run] would create tmux session {session}: {command}"
         self._run(
