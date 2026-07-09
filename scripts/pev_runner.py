@@ -58,6 +58,17 @@ def extra_bin_dirs() -> list[str]:
     ]
 
 
+def _child_pids(pid: int) -> list[int]:
+    """Direct children of a pid (Linux)."""
+    out: list[int] = []
+    for task in Path(f"/proc/{pid}/task").glob("*"):
+        try:
+            out += [int(x) for x in (task / "children").read_text().split()]
+        except (OSError, ValueError):
+            continue
+    return out
+
+
 def resolve_bin(name: str) -> str:
     """Resolve a CLI binary robustly: an absolute path is trusted as-is;
     otherwise try PATH, then the extra user-install dirs. Falls back to the
@@ -294,9 +305,18 @@ class TmuxDriver:
         session = self._session_name(agent)
         if not session:
             return True  # not configured — let the normal path report it
-        if self._run(["tmux", "has-session", "-t", session]).returncode == 0:
+        if self._run(["tmux", "has-session", "-t", session]).returncode != 0:
+            self.start(agent)
+            return False
+        if self._cli_running(agent):
             return True
-        self.start(agent)
+        # Session alive but the CLI exited and left a bare shell. Relaunch the
+        # CLI in place rather than pasting the prompt into bash.
+        pane = self._pane(agent)
+        if self.cfg.dry_run:
+            return False
+        self._run(["tmux", "respawn-pane", "-k", "-t", pane,
+                   f"bash -lc {shlex.quote(self._launch_command(agent) + '; exec bash -l')}"])
         return False
 
     def send(self, agent: str, text: str) -> str:
@@ -336,6 +356,51 @@ class TmuxDriver:
             detail = (result.stderr or result.stdout).strip() or f"exit {result.returncode}"
             return f"tmux capture failed for {pane}: {detail}"
         return result.stdout or "(empty pane)"
+
+
+    def _pane_pid(self, agent: str) -> int | None:
+        pane = self._pane(agent)
+        if not pane:
+            return None
+        result = self._run(["tmux", "display-message", "-p", "-t", pane, "#{pane_pid}"])
+        try:
+            return int(result.stdout.strip())
+        except (ValueError, AttributeError):
+            return None
+
+    def _pane_dead(self, agent: str) -> bool:
+        pane = self._pane(agent)
+        result = self._run(["tmux", "display-message", "-p", "-t", pane, "#{pane_dead}"])
+        return result.stdout.strip() == "1"
+
+    def _cli_running(self, agent: str) -> bool:
+        """Is the agent CLI actually the live process in the pane?
+
+        `tmux has-session` is not enough: the pane runs `bash -lc '<cli>; exec
+        bash -l'`, so when the CLI exits (crash, `codex` self-update telling you
+        to restart, binary not on the login shell's PATH) the pane drops to a
+        bare shell while the session stays alive. Pasting a prompt into that
+        shell would execute it as a command. `pane_current_command` reports the
+        `bash -lc` wrapper either way, so inspect the process tree instead.
+        """
+        if self._pane_dead(agent):
+            return False
+        pid = self._pane_pid(agent)
+        if pid is None:
+            return False
+        wanted = Path(resolve_bin(self.cfg.claude_bin if agent == "claude" else self.cfg.codex_bin)).name
+        for candidate in [pid, *_child_pids(pid)]:
+            try:
+                cmdline = Path(f"/proc/{candidate}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+            except OSError:
+                continue
+            # skip the `bash -lc '<cli> ...'` wrapper: its cmdline names the CLI
+            # too, but it is a shell, not the CLI.
+            if cmdline.split()[:1] == ["bash"]:
+                continue
+            if wanted in cmdline:
+                return True
+        return False
 
     def _launch_command(self, agent: str) -> str:
         """Shell command the tmux session runs. Model/effort are appended here —
@@ -402,7 +467,9 @@ class TmuxDriver:
     def status(self, agent: str) -> dict[str, Any]:
         pane = self._pane(agent)
         session = self._session_name(agent)
-        alive = bool(session) and self._run(["tmux", "has-session", "-t", session]).returncode == 0
+        alive = (bool(session)
+                 and self._run(["tmux", "has-session", "-t", session]).returncode == 0
+                 and self._cli_running(agent))
         return {"driver": "tmux", "pane": pane, "session": session, "alive": alive, "idle": self.idle(agent)}
 
 
