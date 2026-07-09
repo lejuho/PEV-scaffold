@@ -186,6 +186,9 @@ const copy = {
     ctxAdded: "Context file added.",
     initSpec: "Spec (optional)",
     initDesign: "Design system (optional)",
+    noSpec: "no spec",
+    noSpecTitle: "No spec file in docs/spec/ — requirements live only in chat prompts. Add one via 📎 Context.",
+    noSpecWarn: "This project has no spec file (docs/spec/). Requirements will come only from the cycle prompt, not a durable artifact. Send /implement anyway?",
   },
   ko: {
     refresh: "새로고침",
@@ -341,6 +344,9 @@ const copy = {
     ctxAdded: "컨텍스트 파일을 추가했습니다.",
     initSpec: "명세 (선택)",
     initDesign: "디자인 시스템 (선택)",
+    noSpec: "명세 없음",
+    noSpecTitle: "docs/spec/에 명세 파일이 없습니다 — 요구사항이 프롬프트(대화)에만 존재합니다. 📎 컨텍스트로 추가하세요.",
+    noSpecWarn: "이 프로젝트에는 명세 파일(docs/spec/)이 없습니다. 요구사항이 지속 아티팩트가 아니라 사이클 프롬프트에서만 옵니다. 그래도 /implement를 보낼까요?",
   },
 };
 
@@ -830,7 +836,7 @@ function render() {
       <article class="card${hiddenClass}" data-project-card="${p.id}">
         <div class="card-head">
           <div>
-            <div class="title">${p.meta.pinned ? "★ " : ""}${p.name}<span class="driver-chip">${p.driver || "tmux"}</span></div>
+            <div class="title">${p.meta.pinned ? "★ " : ""}${p.name}<span class="driver-chip">${p.driver || "tmux"}</span>${p.hasSpec === false ? `<span class="driver-chip warn" title="${esc(t("noSpecTitle"))}">⚠ ${t("noSpec")}</span>` : ""}</div>
             <div class="root">${p.root}</div>
           </div>
           ${phaseBadge(p.phase)}
@@ -1108,6 +1114,10 @@ async function handleAction(button) {
   if (button.dataset.action === "command") {
     const command = button.dataset.command;
     if (command === "/merge" && !window.confirm(t("confirmMerge"))) return;
+    if (command === "/implement") {
+      const proj = projects.find((p) => p.id === project);
+      if (proj && proj.hasSpec === false && !window.confirm(t("noSpecWarn"))) return;
+    }
     await runCommand(project, command);
     return;
   }

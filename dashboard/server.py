@@ -251,6 +251,11 @@ def scan_project(project: Project, meta: dict[str, Any]) -> dict[str, Any]:
     branch = git_out(project, ["branch", "--show-current"])
     head = git_out(project, ["rev-parse", "--short", "HEAD"])
     dirty = bool(git_out(project, ["status", "--porcelain"]))
+    spec_dir = project.root / "docs" / "spec"
+    try:
+        has_spec = spec_dir.is_dir() and any(p.is_file() for p in spec_dir.iterdir())
+    except OSError:
+        has_spec = False
     flow = flow_state(project)
     expected = expected_done(cycle, status, latest_review_rel, verdict)
     pending_done = None
@@ -296,6 +301,7 @@ def scan_project(project: Project, meta: dict[str, Any]) -> dict[str, Any]:
         },
         "git": {"branch": branch, "head": head, "dirty": dirty},
         "driver": project.driver,
+        "hasSpec": has_spec,
         "agents": agent_states(project),
         "meta": {
             "archived": bool(meta.get("archived")),

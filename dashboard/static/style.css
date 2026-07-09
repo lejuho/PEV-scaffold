@@ -165,6 +165,7 @@ main { padding: 20px; display: grid; gap: 18px; }
   vertical-align: middle;
   letter-spacing: 0.04em;
 }
+.driver-chip.warn { color: var(--warn); border-color: var(--warn); background: var(--warn-weak); cursor: help; }
 
 /* ── 단일 CTA ── */
 .cta-row {
