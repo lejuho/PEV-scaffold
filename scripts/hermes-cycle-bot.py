@@ -580,8 +580,24 @@ def agent_idle(cfg: Config, agent: str) -> bool:
     return bool(get_runner(cfg).idle(agent))
 
 
+def agent_alive(cfg: Config, agent: str) -> bool | None:
+    """True/False for tmux (session exists?), None for headless (n/a)."""
+    try:
+        return get_runner(cfg).alive(agent)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def session_label(alive: bool | None) -> str:
+    if alive is None:
+        return "n/a (headless)"
+    return "alive" if alive else "DEAD"
+
+
 def flow_status_text(cfg: Config, state: CycleState) -> str:
     flow = load_flow_state(cfg)
+    claude_alive = agent_alive(cfg, "claude")
+    codex_alive = agent_alive(cfg, "codex")
     claude_idle = agent_idle(cfg, "claude")
     codex_idle = agent_idle(cfg, "codex")
     done_pass = expected_done_pass(state)
@@ -596,6 +612,8 @@ def flow_status_text(cfg: Config, state: CycleState) -> str:
             f"Expected done pass: {done_pass if done_pass is not None else '-'}",
             f"Pending done: {pending_done or '-'}",
             f"Processed done: {len(processed_done_files(flow))}",
+            f"Claude session: {session_label(claude_alive)}",
+            f"Codex session: {session_label(codex_alive)}",
             f"Claude idle: {'yes' if claude_idle else 'no'}",
             f"Codex idle: {'yes' if codex_idle else 'no'}",
             "",
@@ -677,6 +695,26 @@ def flow_send_review_for_done(
     return reply
 
 
+def ensure_agents_ready(cfg: Config, flow: dict[str, Any]) -> str | None:
+    """Recreate any dead tmux session before the flow reads idle state.
+
+    A dead pane makes idle() return None, which reads as 'busy' upstream — the
+    flow would then wait forever and never reach the send() that self-heals.
+    Returns a message when something was (re)created so the caller skips this
+    tick and lets the CLI boot; None when both sessions are usable."""
+    recreated: list[str] = []
+    for agent in ("claude", "codex"):
+        if agent_alive(cfg, agent) is False:
+            get_runner(cfg).start(agent)
+            recreated.append(agent)
+    if not recreated:
+        return None
+    names = ", ".join(recreated)
+    send_flow_notice(cfg, flow, f"pane-recreated:{names}",
+                     f"Flow: recreated tmux session(s) for {names}; waiting for CLI boot.")
+    return f"Flow: recreated tmux session(s) for {names}. Waiting for boot; advancing next tick."
+
+
 def maybe_advance_flow(cfg: Config, state: CycleState, force: bool = False) -> str | None:
     flow = load_flow_state(cfg)
     mode = flow.get("mode", "off")
@@ -688,6 +726,11 @@ def maybe_advance_flow(cfg: Config, state: CycleState, force: bool = False) -> s
         send_flow_notice(cfg, flow, f"cycle-{state.cycle}:escalated", "Flow paused: cycle escalated.")
         save_flow_state(cfg, flow)
         return None
+
+    ready_msg = ensure_agents_ready(cfg, flow)
+    if ready_msg:
+        save_flow_state(cfg, flow)
+        return ready_msg
 
     claude_idle = agent_idle(cfg, "claude")
     codex_idle = agent_idle(cfg, "codex")

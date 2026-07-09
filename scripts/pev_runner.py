@@ -533,9 +533,10 @@ class HeadlessDriver:
         return header + "\n" + (rendered or "(no output yet)")
 
     def idle(self, agent: str) -> bool | None:
+        # No entry yet means no turn has ever run — nothing is busy, so the
+        # agent is ready. Returning None here would read as "busy" upstream and
+        # stall the flow on a freshly created project.
         entry = self._refresh(agent)
-        if not entry:
-            return None
         return entry.get("status") != "running"
 
     def start(self, agent: str) -> str:
@@ -695,6 +696,11 @@ class AgentRunner:
 
     def idle(self, agent: str) -> bool | None:
         return self.driver.idle(agent)
+
+    def alive(self, agent: str) -> bool | None:
+        """True/False for the tmux driver (session exists?). None for headless,
+        where there is no long-lived session to be alive or dead."""
+        return self.driver.status(agent).get("alive")
 
     def start(self, agent: str) -> str:
         return self.driver.start(agent)
