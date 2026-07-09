@@ -264,10 +264,13 @@ def acquire_repo(args: argparse.Namespace, dest: Path, log: StepLogger) -> None:
         log.log("cloned", f"{args.repo} → {dest}")
         return
 
-    # source == "new": create on GitHub, then clone
+    # source == "new": create the empty repo on GitHub, then clone into dest.
+    # `--clone` is a bare flag (clones into ./<name>); it can't target a path,
+    # so create without it and clone explicitly to dest.
     repo_name = args.repo or args.name
-    run(["gh", "repo", "create", repo_name, f"--{args.visibility}", "--clone", str(dest)],
-        cwd=dest.parent, timeout=300)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    run(["gh", "repo", "create", repo_name, f"--{args.visibility}"], cwd=dest.parent, timeout=300)
+    run(["gh", "repo", "clone", repo_name, str(dest)], cwd=dest.parent, timeout=300)
     log.log("github repo created", f"{repo_name} ({args.visibility}) → {dest}")
 
 
