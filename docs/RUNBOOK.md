@@ -412,6 +412,32 @@ overwritten (reported as "kept existing" — merge manually). The dashboard has
 the same flow behind the **＋ New** button; progress streams into the console
 panel via `/api/projects/init` + `/api/init/<job>`.
 
+## Deployment (Tailscale-exposed, per-project)
+
+The scaffold provides the *trigger + exposure harness*; each project fills the
+*build/start* specifics in a cycle. Concretely, `init` provisions:
+
+- a free port in `8800–8899` (recorded as `port` in `projects.json`, no
+  collisions — `PEV_DEPLOY_PORT_BASE`/`_END` to change the range),
+- `deploy/redeploy.sh` (skeleton: pull → **TODO build** → restart service →
+  **TODO health check**), and
+- `deploy/<name>.service` (systemd --user template binding `HOST=<tailnet-ip>`
+  `PORT=<port>`; `ExecStart=/bin/false` placeholder). Tailnet IP defaults to
+  this box (`PEV_TAILNET_IP`, `100.96.172.67`).
+
+A project's PEV cycle fills the TODO build/start commands (the Executor knows
+the stack from AGENTS.md), installs+enables the unit
+(`systemctl --user enable --now <name>`), and makes the server bind to
+`$HOST:$PORT`. Because Tailscale is already up on the box, there's no external
+console step — the cycle completes the whole deploy path.
+
+The dashboard's 🚀 **Deploy** button runs `deploy/redeploy.sh` in the
+background (`POST /api/projects/<id>/deploy` → `/api/deploy/<job>`), streaming
+output to the console. `redeploy.sh`'s own `pnpm verify` (or equivalent) is the
+CI gate; Codex's READY_TO_MERGE is the second gate. Existing projects can opt
+in by setting `deployScript` in their `projects.json` entry (e.g. cairn's
+`deploy/scripts/redeploy-production.sh`).
+
 ## Recovery
 
 Empty dashboard tail:

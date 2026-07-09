@@ -534,6 +534,40 @@ def init_job_status(job_id: str) -> dict[str, Any]:
     return {"job": job_id, "meta": meta, "running": running, "steps": steps, "summary": summary}
 
 
+def start_deploy_job(project: Project) -> dict[str, Any]:
+    """Run the project's redeploy script in the background, streaming output
+    through the same job-log mechanism as init."""
+    rel = str((project.raw or {}).get("deployScript") or "deploy/redeploy.sh")
+    if rel.startswith("/") or ".." in rel.split("/"):
+        raise ValueError("Invalid deployScript path")
+    script = (project.root / rel).resolve()
+    if not str(script).startswith(str(project.root.resolve())):
+        raise ValueError("deployScript escapes project root")
+    if not script.exists():
+        raise FileNotFoundError(f"No deploy script at {rel} — wire it in a cycle first")
+    job_id = f"deploy-{project.id}-{int(time.time())}"
+    INIT_JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = INIT_JOBS_DIR / f"{job_id}.jsonl"
+    env = dict(os.environ)
+    env["HERMES_ROOT"] = str(project.root)
+    # Run the script, then emit a summary line carrying the exit code so the
+    # job-status reader (shared with init) can report success/failure.
+    wrapper = ('bash "$1"; ec=$?; if [ $ec -eq 0 ]; then ok=true; else ok=false; fi; '
+               "printf '{\"summary\":{\"ok\":%s,\"exit\":%s}}\\n' \"$ok\" \"$ec\"")
+    with log_path.open("w", encoding="utf-8") as log_fh:
+        proc = subprocess.Popen(
+            ["bash", "-c", wrapper, "pev-deploy", str(script)],
+            stdout=log_fh, stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL, start_new_session=True, cwd=str(project.root), env=env,
+        )
+    write_json(INIT_JOBS_DIR / f"{job_id}.meta.json", {
+        "job": job_id, "name": project.id, "pid": proc.pid, "startedAt": utc_now(),
+        "kind": "deploy", "script": rel,
+    })
+    append_event(project, "dashboard_deploy", {"script": rel})
+    return {"job": job_id}
+
+
 def project_cycle_tags(meta: dict[str, Any]) -> dict[str, str]:
     tags = meta.get("cycleTags")
     if not isinstance(tags, dict):
@@ -663,7 +697,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self.send_json({"ok": True, "metrics": data, "updatedAt": utc_now()})
             return
-        match = re.fullmatch(r"/api/init/([^/]+)", path)
+        match = re.fullmatch(r"/api/(?:init|deploy)/([^/]+)", path)
         if match:
             try:
                 self.send_json({"ok": True, **init_job_status(unquote(match.group(1)))})
@@ -742,7 +776,7 @@ class Handler(BaseHTTPRequestHandler):
             except (OSError, ValueError, json.JSONDecodeError) as err:
                 self.send_error_json(str(err), 400)
             return
-        match = re.fullmatch(r"/api/projects/([^/]+)/(command|meta|done|agent|context)", path)
+        match = re.fullmatch(r"/api/projects/([^/]+)/(command|meta|done|agent|context|deploy)", path)
         if not match:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
@@ -753,6 +787,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             body = self.read_body()
+            if action == "deploy":
+                result = start_deploy_job(project)
+                self.send_json({"ok": True, **result})
+                return
             if action == "context":
                 result = run_context(project, body)
                 self.send_json({"ok": True, "result": result})

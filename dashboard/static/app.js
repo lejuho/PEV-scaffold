@@ -189,6 +189,12 @@ const copy = {
     noSpec: "no spec",
     noSpecTitle: "No spec file in docs/spec/ — requirements live only in chat prompts. Add one via 📎 Context.",
     noSpecWarn: "This project has no spec file (docs/spec/). Requirements will come only from the cycle prompt, not a durable artifact. Send /implement anyway?",
+    deploy: "🚀 Deploy",
+    deployDesc: "run deploy/redeploy.sh",
+    confirmDeploy: "Run this project's redeploy script (deploy/redeploy.sh)?",
+    deploying: "Deploying…",
+    deployDone: "Deployed.",
+    deployFailed: "Deploy failed — see output above.",
   },
   ko: {
     refresh: "새로고침",
@@ -347,6 +353,12 @@ const copy = {
     noSpec: "명세 없음",
     noSpecTitle: "docs/spec/에 명세 파일이 없습니다 — 요구사항이 프롬프트(대화)에만 존재합니다. 📎 컨텍스트로 추가하세요.",
     noSpecWarn: "이 프로젝트에는 명세 파일(docs/spec/)이 없습니다. 요구사항이 지속 아티팩트가 아니라 사이클 프롬프트에서만 옵니다. 그래도 /implement를 보낼까요?",
+    deploy: "🚀 배포",
+    deployDesc: "deploy/redeploy.sh 실행",
+    confirmDeploy: "이 프로젝트의 재배포 스크립트(deploy/redeploy.sh)를 실행할까요?",
+    deploying: "배포 중…",
+    deployDone: "배포 완료.",
+    deployFailed: "배포 실패 — 위 출력을 확인하세요.",
   },
 };
 
@@ -868,6 +880,10 @@ function render() {
             ${commandButton(p, t("review"), "/review", t("reviewDesc"))}
             ${commandButton(p, t("recheck"), "/recheck", t("recheckDesc"))}
             ${commandButton(p, t("merge"), "/merge", t("mergeDesc"), "good")}
+            <button type="button" class="action-btn good" data-action="deploy" data-project="${p.id}">
+              <span class="btn-title">${t("deploy")}</span>
+              <span class="btn-desc">${t("deployDesc")}</span>
+            </button>
             <button type="button" class="action-btn danger" data-action="done" data-project="${p.id}">
               <span class="btn-title">${t("createDone")}</span>
               <span class="btn-desc">${t("createDoneDesc")}</span>
@@ -1127,6 +1143,13 @@ async function handleAction(button) {
     log(body.tail || t("empty"));
   }
   if (button.dataset.action === "context") await openContextDialog(project);
+  if (button.dataset.action === "deploy") {
+    if (!window.confirm(t("confirmDeploy"))) return;
+    const body = await api(`/api/projects/${encodeURIComponent(project)}/deploy`, { method: "POST" });
+    log(`${t("deploying")} (job ${body.job})`);
+    pollDeployJob(body.job);
+    return;
+  }
   if (button.dataset.action === "done") await createDone(project);
   if (button.dataset.action === "note") {
     const input = document.querySelector(`[data-note="${CSS.escape(project)}"]`);
@@ -1194,23 +1217,23 @@ function formatInitStep(s) {
   return `${s.ok === false ? "✗" : "✓"} ${s.step}${s.detail ? ` — ${s.detail}` : ""}`;
 }
 
-async function pollInitJob(job) {
+function pollJob(job, base, labels) {
   const started = Date.now();
   const poll = async () => {
     let status;
     try {
-      status = await api(`/api/init/${encodeURIComponent(job)}`);
+      status = await api(`${base}/${encodeURIComponent(job)}`);
     } catch (err) {
       log(`ERROR: ${err.message}`);
       return;
     }
-    const lines = [t("initRunning"), "", ...status.steps.map(formatInitStep)];
+    const lines = [labels.running, "", ...status.steps.map(formatInitStep)];
     if (!status.running) {
       if (status.summary && status.summary.ok) {
-        lines[0] = `${t("initDone")} (${status.summary.root})`;
-        lines.push("", ...(status.summary.next || []));
+        lines[0] = labels.done(status.summary);
+        if (status.summary.next) lines.push("", ...status.summary.next);
       } else {
-        lines[0] = t("initFailed");
+        lines[0] = labels.failed;
       }
       log(lines.join("\n"));
       await load();
@@ -1220,6 +1243,22 @@ async function pollInitJob(job) {
     if (Date.now() - started < 20 * 60 * 1000) setTimeout(poll, 2000);
   };
   poll();
+}
+
+function pollInitJob(job) {
+  pollJob(job, "/api/init", {
+    running: t("initRunning"),
+    done: (s) => `${t("initDone")} (${s.root})`,
+    failed: t("initFailed"),
+  });
+}
+
+function pollDeployJob(job) {
+  pollJob(job, "/api/deploy", {
+    running: t("deploying"),
+    done: (s) => `${t("deployDone")} (exit ${s.exit})`,
+    failed: t("deployFailed"),
+  });
 }
 
 function syncInitSourceFields() {

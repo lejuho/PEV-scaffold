@@ -346,6 +346,77 @@ def inject_artifacts(dest: Path, driver: str, log: StepLogger) -> tuple[list[str
     return copied, skipped
 
 
+# ---------------------------------------------------------------------------
+# deploy skeleton (Tailscale-exposed systemd service + redeploy script)
+
+TAILNET_IP = os.environ.get("PEV_TAILNET_IP", "100.96.172.67")
+DEPLOY_PORT_BASE = int(os.environ.get("PEV_DEPLOY_PORT_BASE", "8800"))
+DEPLOY_PORT_END = int(os.environ.get("PEV_DEPLOY_PORT_END", "8900"))
+
+REDEPLOY_SKELETON = """#!/usr/bin/env bash
+# PEV redeploy for __NAME__ — fill the TODO build/start steps for this stack.
+# Triggered by the dashboard 🚀 Deploy button, or run directly.
+set -Eeuo pipefail
+cd "$(dirname "$0")/.."   # -> project root
+
+SERVICE="${PEV_DEPLOY_SERVICE:-__NAME__}"
+HOST=__TAILNET_IP__
+PORT=__PORT__
+
+echo "==> pull"
+git pull --ff-only || echo "(skip pull)"
+
+# TODO: install deps  (e.g. corepack pnpm install --frozen-lockfile)
+# TODO: build         (e.g. corepack pnpm -r build; interpreted servers may skip)
+
+echo "==> restart ${SERVICE}"
+systemctl --user restart "${SERVICE}.service"
+
+# TODO: health check  (e.g. curl -fsS "http://${HOST}:${PORT}/health")
+echo "==> deployed -> http://${HOST}:${PORT} (tailnet)"
+"""
+
+SERVICE_SKELETON = """[Unit]
+Description=__NAME__ (PEV-deployed)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__ROOT__
+Environment=HOST=__TAILNET_IP__
+Environment=PORT=__PORT__
+# TODO: set ExecStart to your server start command; bind it to $HOST:$PORT.
+#   node:   ExecStart=/usr/bin/node server/dist/index.js
+#   python: ExecStart=/usr/bin/python3 server.py
+ExecStart=/bin/false
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def inject_deploy(dest: Path, name: str, port: int, log: StepLogger) -> None:
+    sub = {"__NAME__": name, "__ROOT__": str(dest), "__PORT__": str(port), "__TAILNET_IP__": TAILNET_IP}
+
+    def fill(text: str) -> str:
+        for key, value in sub.items():
+            text = text.replace(key, value)
+        return text
+
+    copied: list[str] = []
+    skipped: list[str] = []
+    sh = dest / "deploy" / "redeploy.sh"
+    if write_if_absent(sh, fill(REDEPLOY_SKELETON), copied, skipped):
+        make_executable(sh)
+    write_if_absent(dest / "deploy" / f"{name}.service", fill(SERVICE_SKELETON), copied, skipped)
+    log.log("deploy skeleton", f"port {port} -> {TAILNET_IP} ({len(copied)} new, {len(skipped)} kept)")
+    for path in skipped:
+        log.log("kept existing", path)
+
+
 def tailor_agents_md(dest: Path, stack: str, log: StepLogger) -> None:
     claude_bin = os.environ.get("PEV_CLAUDE_BIN", shutil.which("claude") or "claude")
     prompt = (
@@ -403,8 +474,35 @@ def default_projects_file() -> Path:
     return SCAFFOLD_ROOT / "dashboard" / "projects.json"
 
 
-def register_project(args: argparse.Namespace, dest: Path, log: StepLogger) -> None:
-    path = Path(args.projects_file) if args.projects_file else default_projects_file()
+def projects_file_path(args: argparse.Namespace) -> Path:
+    return Path(args.projects_file) if args.projects_file else default_projects_file()
+
+
+def load_projects_list(path: Path) -> list[dict[str, Any]]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except json.JSONDecodeError:
+        data = {}
+    projects = data.get("projects") if isinstance(data, dict) else None
+    return projects if isinstance(projects, list) else []
+
+
+def assign_deploy_port(args: argparse.Namespace) -> int:
+    """Next free port in the deploy range, avoiding ports already in projects.json."""
+    used = set()
+    for entry in load_projects_list(projects_file_path(args)):
+        try:
+            used.add(int(entry.get("port")))
+        except (TypeError, ValueError):
+            continue
+    for port in range(DEPLOY_PORT_BASE, DEPLOY_PORT_END):
+        if port not in used:
+            return port
+    return DEPLOY_PORT_BASE  # range exhausted — fall back (operator resolves)
+
+
+def register_project(args: argparse.Namespace, dest: Path, log: StepLogger, port: int) -> None:
+    path = projects_file_path(args)
     try:
         data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {"projects": []}
     except json.JSONDecodeError:
@@ -419,6 +517,8 @@ def register_project(args: argparse.Namespace, dest: Path, log: StepLogger) -> N
         "root": str(dest),
         "hermesScript": "scripts/hermes-cycle-bot.py",
         "driver": args.driver,
+        "port": port,
+        "deployScript": "deploy/redeploy.sh",
     }
     if args.driver == "tmux":
         entry["claudePane"] = f"{args.name}-claude:0"
@@ -428,7 +528,7 @@ def register_project(args: argparse.Namespace, dest: Path, log: StepLogger) -> N
     projects.append(entry)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    log.log("dashboard registered", f"{args.name} in {path}")
+    log.log("dashboard registered", f"{args.name} in {path} (port {port})")
 
 
 def prepare_sessions(dest: Path, driver: str, log: StepLogger) -> None:
@@ -473,26 +573,29 @@ def cmd_init(args: argparse.Namespace) -> int:
     log = StepLogger(args.json)
     dest = Path(args.dest).expanduser().resolve() if args.dest else Path.home() / args.name
     context_entries = load_context_entries(args)
+    port = assign_deploy_port(args)
     acquire_repo(args, dest, log)
     ensure_first_commit(dest, args.name, log)
     inject_artifacts(dest, args.driver, log)
+    inject_deploy(dest, args.name, port, log)
     if args.stack:
         tailor_agents_md(dest, args.stack, log)
     if context_entries:
         inject_context_entries(dest, context_entries, log)
     commit_and_push(dest, push=not args.no_push, log=log)
-    register_project(args, dest, log)
+    register_project(args, dest, log, port)
     prepare_sessions(dest, args.driver, log)
     summary = {
         "ok": all(s["ok"] for s in log.steps),
         "root": str(dest),
         "driver": args.driver,
+        "port": port,
         "startedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "steps": log.steps,
         "next": [
             "Review AGENTS.md sections (Architecture/Commands/Testing) before the first cycle.",
             f"Create the first plan: {dest}/.review/cycle-1/plan.md",
-            "Then /implement from the dashboard or Telegram.",
+            f"Wire deployment in a cycle: fill deploy/redeploy.sh + deploy/{args.name}.service (binds {TAILNET_IP}:{port}), then use the 🚀 Deploy button.",
         ],
     }
     print(json.dumps(summary, ensure_ascii=False, indent=2) if not args.json
