@@ -286,7 +286,8 @@ def ensure_first_commit(dest: Path, name: str, log: StepLogger) -> None:
     log.log("initial commit", "README.md")
 
 
-def inject_artifacts(dest: Path, driver: str, log: StepLogger) -> tuple[list[str], list[str]]:
+def inject_artifacts(dest: Path, driver: str, log: StepLogger,
+                     claude_model: str = "") -> tuple[list[str], list[str]]:
     if not TEMPLATE_DIR.is_dir():
         raise SystemExit(f"template bundle missing: {TEMPLATE_DIR}")
     copied: list[str] = []
@@ -331,6 +332,13 @@ def inject_artifacts(dest: Path, driver: str, log: StepLogger) -> tuple[list[str
         f"PEV_DRIVER={driver}",
         f"PEV_CLAUDE_BIN={os.environ.get('PEV_CLAUDE_BIN') or resolve_bin('claude')}",
         f"PEV_CODEX_BIN={os.environ.get('PEV_CODEX_BIN') or resolve_bin('codex')}",
+        "",
+        "# Always pin the model. A headless `claude -p` with no --model silently",
+        "# inherits the operator's default model (e.g. an Opus tier), which is the",
+        "# wrong cost/role fit for the Executor (CLAUDE.md specifies Sonnet).",
+        f"PEV_CLAUDE_MODEL={claude_model or DEFAULT_CLAUDE_MODEL}",
+        "# PEV_CODEX_MODEL=",
+        "",
         "# HERMES_TELEGRAM_TOKEN=",
         "# HERMES_CHAT_ID=",
     ]
@@ -355,6 +363,10 @@ def inject_artifacts(dest: Path, driver: str, log: StepLogger) -> tuple[list[str
 
 # ---------------------------------------------------------------------------
 # deploy skeleton (Tailscale-exposed systemd service + redeploy script)
+
+# Executor role model. Never leave this unset: a headless `claude -p` with no
+# --model inherits the operator's default (possibly an Opus tier).
+DEFAULT_CLAUDE_MODEL = os.environ.get("PEV_DEFAULT_CLAUDE_MODEL", "sonnet")
 
 TAILNET_IP = os.environ.get("PEV_TAILNET_IP", "100.96.172.67")
 DEPLOY_PORT_BASE = int(os.environ.get("PEV_DEPLOY_PORT_BASE", "8800"))
@@ -530,8 +542,9 @@ def register_project(args: argparse.Namespace, dest: Path, log: StepLogger, port
     if args.driver == "tmux":
         entry["claudePane"] = f"{args.name}-claude:0"
         entry["codexPane"] = f"{args.name}-codex:0"
-    if args.claude_model:
-        entry["claudeModel"] = args.claude_model
+    # Always record the model — an unset one means headless inherits the
+    # operator's default model, which is the wrong role/cost fit.
+    entry["claudeModel"] = args.claude_model or DEFAULT_CLAUDE_MODEL
     projects.append(entry)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -583,7 +596,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     port = assign_deploy_port(args)
     acquire_repo(args, dest, log)
     ensure_first_commit(dest, args.name, log)
-    inject_artifacts(dest, args.driver, log)
+    inject_artifacts(dest, args.driver, log, args.claude_model or "")
     inject_deploy(dest, args.name, port, log)
     if args.stack:
         tailor_agents_md(dest, args.stack, log)

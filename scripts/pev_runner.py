@@ -524,7 +524,9 @@ class HeadlessDriver:
         entry = self._refresh(agent)
         rel_log = entry.get("log")
         if not rel_log:
-            return f"{agent}: no headless turns yet"
+            return (f"{agent}: no turns yet. This project uses the headless driver, so there is "
+                    f"no tmux pane to capture — output streams here (live) once a turn starts, "
+                    f"e.g. via /implement. Switch the project to driver=tmux if you want a pane.")
         path = self.cfg.root / rel_log
         if not path.exists():
             return f"{agent}: turn log missing: {rel_log}"
