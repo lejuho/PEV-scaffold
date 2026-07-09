@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -34,6 +35,25 @@ from typing import Any
 SCRIPT_DIR = Path(__file__).resolve().parent
 SCAFFOLD_ROOT = SCRIPT_DIR.parent
 TEMPLATE_DIR = SCAFFOLD_ROOT / "templates" / "multi-agent-artifact"
+
+# Project context: operator-supplied spec / design-system files that guide the
+# agents. Two fixed categories, each a directory holding any number of files.
+CONTEXT_CATEGORIES = {
+    "spec": {
+        "dir": "docs/spec",
+        "exts": (".md", ".txt"),
+        "default": "spec.md",
+        "pointer": "- `docs/spec/` — product specifications. Read the relevant file before planning a cycle.",
+    },
+    "design": {
+        "dir": "docs/design",
+        "exts": (".md", ".css", ".txt", ".json"),
+        "default": "design.md",
+        "pointer": "- `docs/design/` — design-system tokens and UI rules. Read before building or changing UI.",
+    },
+}
+CONTEXT_MARKER = "<!-- PEV_CONTEXT_POINTER -->"
+CONTEXT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 CODEX_HOOKS = [
     "block-dangerous.sh",
@@ -142,6 +162,76 @@ def write_if_absent(dst: Path, content: str, copied: list[str], skipped: list[st
     dst.write_text(content, encoding="utf-8")
     copied.append(str(dst))
     return True
+
+
+# ---------------------------------------------------------------------------
+# project context (spec / design-system files)
+
+
+def validate_context(category: str, name: str) -> tuple[dict[str, Any], str]:
+    """Return (category-config, safe-filename). Raises SystemExit on bad input."""
+    cfg = CONTEXT_CATEGORIES.get(category)
+    if not cfg:
+        raise SystemExit(f"unknown context category: {category} (use {', '.join(CONTEXT_CATEGORIES)})")
+    name = (name or "").strip() or cfg["default"]
+    if not CONTEXT_NAME_RE.fullmatch(name) or "/" in name or ".." in name:
+        raise SystemExit(f"invalid context filename: {name!r}")
+    if not name.lower().endswith(cfg["exts"]):
+        name += cfg["exts"][0]
+    return cfg, name
+
+
+def ensure_agents_pointer(dest: Path) -> bool:
+    """Add the Project Context section to AGENTS.md once (idempotent)."""
+    agents = dest / "AGENTS.md"
+    text = agents.read_text(encoding="utf-8") if agents.exists() else "# AGENTS.md\n"
+    if CONTEXT_MARKER in text:
+        return False
+    block = "\n".join([
+        "",
+        f"## Project Context {CONTEXT_MARKER}",
+        "",
+        "Operator-supplied context files. Follow just-in-time retrieval — read the",
+        "relevant file when the task calls for it, not preemptively:",
+        "",
+        CONTEXT_CATEGORIES["spec"]["pointer"],
+        CONTEXT_CATEGORIES["design"]["pointer"],
+        "",
+    ])
+    if not text.endswith("\n"):
+        text += "\n"
+    agents.write_text(text + block, encoding="utf-8")
+    return True
+
+
+def inject_context(dest: Path, category: str, name: str, content: str) -> dict[str, Any]:
+    """Write one context file under docs/<category>/ and ensure the AGENTS.md
+    pointer exists. Returns metadata; does not commit."""
+    cfg, safe_name = validate_context(category, name)
+    target = dest / cfg["dir"] / safe_name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    existed = target.exists()
+    target.write_text(content, encoding="utf-8")
+    pointer_added = ensure_agents_pointer(dest)
+    rel = str(target.relative_to(dest))
+    return {"path": rel, "category": category, "replaced": existed, "pointerAdded": pointer_added}
+
+
+def list_context(dest: Path) -> dict[str, list[dict[str, Any]]]:
+    out: dict[str, list[dict[str, Any]]] = {}
+    for category, cfg in CONTEXT_CATEGORIES.items():
+        entries: list[dict[str, Any]] = []
+        directory = dest / cfg["dir"]
+        if directory.is_dir():
+            for path in sorted(directory.iterdir()):
+                if path.is_file():
+                    try:
+                        size = path.stat().st_size
+                    except OSError:
+                        size = 0
+                    entries.append({"name": path.name, "path": str(path.relative_to(dest)), "bytes": size})
+        out[category] = entries
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -357,14 +447,39 @@ def prepare_sessions(dest: Path, driver: str, log: StepLogger) -> None:
             log.log(f"session {agent} failed", str(exc), ok=False)
 
 
+def load_context_entries(args: argparse.Namespace) -> list[dict[str, str]]:
+    """Read context entries from --context-json (a file path or '-' for stdin)."""
+    if not getattr(args, "context_json", None):
+        return []
+    raw = sys.stdin.read() if args.context_json == "-" else Path(args.context_json).read_text(encoding="utf-8")
+    data = json.loads(raw) if raw.strip() else []
+    if not isinstance(data, list):
+        raise SystemExit("--context-json must be a JSON array of {category,name,content}")
+    return data
+
+
+def inject_context_entries(dest: Path, entries: list[dict[str, str]], log: StepLogger) -> None:
+    for entry in entries:
+        category = str(entry.get("category") or "")
+        content = str(entry.get("content") or "")
+        try:
+            result = inject_context(dest, category, str(entry.get("name") or ""), content)
+            log.log("context added", f"{result['path']} ({'replaced' if result['replaced'] else 'new'})")
+        except SystemExit as exc:
+            log.log("context failed", str(exc), ok=False)
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     log = StepLogger(args.json)
     dest = Path(args.dest).expanduser().resolve() if args.dest else Path.home() / args.name
+    context_entries = load_context_entries(args)
     acquire_repo(args, dest, log)
     ensure_first_commit(dest, args.name, log)
     inject_artifacts(dest, args.driver, log)
     if args.stack:
         tailor_agents_md(dest, args.stack, log)
+    if context_entries:
+        inject_context_entries(dest, context_entries, log)
     commit_and_push(dest, push=not args.no_push, log=log)
     register_project(args, dest, log)
     prepare_sessions(dest, args.driver, log)
@@ -385,6 +500,34 @@ def cmd_init(args: argparse.Namespace) -> int:
     return 0 if summary["ok"] else 1
 
 
+def cmd_context(args: argparse.Namespace) -> int:
+    dest = Path(args.root).expanduser().resolve()
+    if not dest.is_dir():
+        raise SystemExit(f"project root not found: {dest}")
+    if args.action == "list":
+        print(json.dumps({"ok": True, "context": list_context(dest)}, ensure_ascii=False))
+        return 0
+    # add
+    if args.content_file:
+        content = sys.stdin.read() if args.content_file == "-" else Path(args.content_file).read_text(encoding="utf-8")
+    else:
+        content = args.content or ""
+    result = inject_context(dest, args.category, args.name or "", content)
+    committed = False
+    if not args.no_commit:
+        run(["git", "add", "-A"], cwd=dest, check=False)
+        status = run(["git", "status", "--porcelain"], cwd=dest, check=False).stdout.strip()
+        if status:
+            run(["git", "commit", "-m", f"docs: add context {result['path']}"], cwd=dest, check=False)
+            committed = True
+        if args.push:
+            branch = run(["git", "branch", "--show-current"], cwd=dest, check=False).stdout.strip() or "main"
+            if "origin" in run(["git", "remote"], cwd=dest, check=False).stdout.split():
+                run(["git", "push", "origin", branch], cwd=dest, timeout=300, check=False)
+    print(json.dumps({"ok": True, "result": {**result, "committed": committed}}, ensure_ascii=False))
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="PEV project bootstrap")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -399,17 +542,33 @@ def main() -> int:
     p.add_argument("--stack", help="one-line stack description; tailors AGENTS.md via a cheap model call")
     p.add_argument("--claude-model", help="model recorded for the dashboard runner config")
     p.add_argument("--projects-file", help="dashboard projects.json to register into")
+    p.add_argument("--context-json", help="path (or '-') to a JSON array of {category,name,content} context files")
     p.add_argument("--no-push", action="store_true")
     p.add_argument("--json", action="store_true", help="stream steps as JSON lines")
+
+    c = sub.add_parser("context", help="add or list spec/design context files")
+    c.add_argument("action", choices=["add", "list"])
+    c.add_argument("--root", required=True, help="project root directory")
+    c.add_argument("--category", choices=list(CONTEXT_CATEGORIES))
+    c.add_argument("--name", help="filename (default per category)")
+    c.add_argument("--content", help="file content inline")
+    c.add_argument("--content-file", help="read content from path, or '-' for stdin")
+    c.add_argument("--no-commit", action="store_true")
+    c.add_argument("--push", action="store_true")
+
     args = parser.parse_args()
-    if args.cmd == "init":
-        try:
+    try:
+        if args.cmd == "init":
             return cmd_init(args)
-        except subprocess.CalledProcessError as exc:
-            detail = (exc.stderr or exc.stdout or "").strip()[-500:]
-            print(json.dumps({"step": "fatal", "ok": False,
-                              "detail": f"{' '.join(exc.cmd)} → {detail}"}, ensure_ascii=False))
-            return 1
+        if args.cmd == "context":
+            if args.action == "add" and not args.category:
+                raise SystemExit("--category is required for 'context add'")
+            return cmd_context(args)
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "").strip()[-500:]
+        print(json.dumps({"step": "fatal", "ok": False,
+                          "detail": f"{' '.join(exc.cmd)} → {detail}"}, ensure_ascii=False))
+        return 1
     return 2
 
 

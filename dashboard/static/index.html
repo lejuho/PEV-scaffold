@@ -45,9 +45,35 @@
           <select name="visibility"><option value="private">private</option><option value="public">public</option></select></label>
         <label class="field"><span id="fStack">Stack (1 line, optional)</span>
           <input name="stack" placeholder="FastAPI + SQLite + React PWA" /></label>
+        <label class="field"><span id="fInitSpec">Spec (optional)</span>
+          <textarea name="spec" rows="3" placeholder="Initial product spec → docs/spec/spec.md"></textarea></label>
+        <label class="field"><span id="fInitDesign">Design system (optional)</span>
+          <textarea name="design" rows="3" placeholder="Design tokens / UI rules → docs/design/design.md"></textarea></label>
         <div class="init-actions">
           <button type="button" id="initCancel">Cancel</button>
           <button type="submit" class="good" id="initSubmit">Create</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="contextDialog" class="init-dialog">
+      <form id="contextForm" method="dialog">
+        <h2 id="ctxTitle">Context files</h2>
+        <div id="ctxList" class="ctx-list"></div>
+        <label class="field"><span id="fCtxCategory">Category</span>
+          <select name="category">
+            <option value="spec">spec (Planner)</option>
+            <option value="design">design (Executor)</option>
+          </select></label>
+        <label class="field"><span id="fCtxName">Filename</span>
+          <input name="name" placeholder="auth.md / tokens.css (optional)" pattern="[A-Za-z0-9][A-Za-z0-9._-]*" /></label>
+        <label class="field"><span id="fCtxContent">Content</span>
+          <textarea name="content" rows="6" placeholder="Paste, or attach a file below"></textarea></label>
+        <label class="field ctx-file-row"><span id="fCtxUpload">Attach file (read as text)</span>
+          <input type="file" id="ctxUpload" accept=".md,.css,.txt,.json,text/*" /></label>
+        <div class="init-actions">
+          <button type="button" id="ctxCancel">Close</button>
+          <button type="submit" class="good" id="ctxSubmit">Add</button>
         </div>
       </form>
     </dialog>

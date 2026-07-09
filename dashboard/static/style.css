@@ -377,6 +377,12 @@ pre {
 }
 .init-dialog input, .init-dialog select { width: 100%; }
 .init-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+.init-dialog textarea { width: 100%; font: inherit; resize: vertical; }
+.ctx-list { display: grid; gap: 8px; margin-bottom: 12px; }
+.ctx-cat ul { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 3px; }
+.ctx-cat li { font-size: 0.82rem; }
+.ctx-cat code { background: var(--overlay-1); border: 1px solid var(--border); border-radius: 3px; padding: 1px 5px; }
+.ctx-file-row input[type="file"] { border: 0; padding: 4px 0; }
 
 @media (max-width: 620px) {
   .topbar { align-items: flex-start; flex-direction: column; }

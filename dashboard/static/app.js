@@ -16,6 +16,12 @@ const newProjectBtn = document.querySelector("#newProject");
 const initDialog = document.querySelector("#initDialog");
 const initForm = document.querySelector("#initForm");
 const initCancelBtn = document.querySelector("#initCancel");
+const contextDialog = document.querySelector("#contextDialog");
+const contextForm = document.querySelector("#contextForm");
+const contextCancelBtn = document.querySelector("#ctxCancel");
+const ctxUploadEl = document.querySelector("#ctxUpload");
+const ctxListEl = document.querySelector("#ctxList");
+let contextProjectId = "";
 
 let projects = [];
 const compactMedia = window.matchMedia("(max-width: 620px)");
@@ -167,6 +173,19 @@ const copy = {
     initDone: "Project ready.",
     initFailed: "Bootstrap failed — see steps above.",
     themeAria: "Toggle light/dark theme",
+    context: "📎 Context",
+    contextDesc: "spec / design files",
+    ctxTitle: "Context files",
+    ctxCategory: "Category",
+    ctxName: "Filename",
+    ctxContent: "Content",
+    ctxUpload: "Attach file (read as text)",
+    ctxAdd: "Add",
+    ctxClose: "Close",
+    ctxEmpty: "No context files yet.",
+    ctxAdded: "Context file added.",
+    initSpec: "Spec (optional)",
+    initDesign: "Design system (optional)",
   },
   ko: {
     refresh: "새로고침",
@@ -309,6 +328,19 @@ const copy = {
     initDone: "프로젝트 준비 완료.",
     initFailed: "부트스트랩 실패 — 위 단계를 확인하세요.",
     themeAria: "라이트/다크 테마 전환",
+    context: "📎 컨텍스트",
+    contextDesc: "명세 / 디자인 파일",
+    ctxTitle: "컨텍스트 파일",
+    ctxCategory: "카테고리",
+    ctxName: "파일명",
+    ctxContent: "내용",
+    ctxUpload: "파일 첨부 (텍스트로 읽음)",
+    ctxAdd: "추가",
+    ctxClose: "닫기",
+    ctxEmpty: "아직 컨텍스트 파일이 없습니다.",
+    ctxAdded: "컨텍스트 파일을 추가했습니다.",
+    initSpec: "명세 (선택)",
+    initDesign: "디자인 시스템 (선택)",
   },
 };
 
@@ -349,6 +381,15 @@ function renderStaticText() {
   refreshBtn.textContent = t("refresh");
   newProjectBtn.textContent = t("newProject");
   document.querySelector("#initTitle").textContent = t("initTitle");
+  document.querySelector("#fInitSpec").textContent = t("initSpec");
+  document.querySelector("#fInitDesign").textContent = t("initDesign");
+  document.querySelector("#ctxTitle").textContent = t("ctxTitle");
+  document.querySelector("#fCtxCategory").textContent = t("ctxCategory");
+  document.querySelector("#fCtxName").textContent = t("ctxName");
+  document.querySelector("#fCtxContent").textContent = t("ctxContent");
+  document.querySelector("#fCtxUpload").textContent = t("ctxUpload");
+  document.querySelector("#ctxSubmit").textContent = t("ctxAdd");
+  document.querySelector("#ctxCancel").textContent = t("ctxClose");
   showArchivedLabelEl.textContent = t("showArchived");
   consoleTitleEl.textContent = t("console");
   sendMessageEl.placeholder = t("sendPlaceholder");
@@ -851,6 +892,9 @@ function render() {
             </button>
           `)}
           ${section(p, t("projectView"), t("projectViewDesc"), `
+            <button type="button" class="action-btn" data-action="context" data-project="${p.id}">
+              <span class="btn-title">${t("context")}</span><span class="btn-desc">${t("contextDesc")}</span>
+            </button>
             ${p.meta.archived ? metaButton(p, t("unarchive"), "unarchive", t("unarchiveDesc")) : metaButton(p, t("archive"), "archive", t("archiveDesc"))}
             ${p.meta.hidden ? metaButton(p, t("show"), "show", t("showDesc")) : metaButton(p, t("hide"), "hide", t("hideDesc"))}
             ${metaButton(p, t("hideUntilNext"), "hideUntilNextCycle", t("hideUntilNextDesc"))}
@@ -1072,6 +1116,7 @@ async function handleAction(button) {
     const body = await api(`/api/projects/${encodeURIComponent(project)}/tail?target=${encodeURIComponent(button.dataset.target)}`);
     log(body.tail || t("empty"));
   }
+  if (button.dataset.action === "context") await openContextDialog(project);
   if (button.dataset.action === "done") await createDone(project);
   if (button.dataset.action === "note") {
     const input = document.querySelector(`[data-note="${CSS.escape(project)}"]`);
@@ -1182,14 +1227,78 @@ initForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const data = Object.fromEntries(new FormData(initForm).entries());
   const body = {};
+  const contextFields = new Set(["spec", "design"]);
   for (const [key, value] of Object.entries(data)) {
-    if (String(value).trim()) body[key] = String(value).trim();
+    if (!contextFields.has(key) && String(value).trim()) body[key] = String(value).trim();
   }
+  const context = [];
+  if (String(data.spec || "").trim()) context.push({ category: "spec", content: String(data.spec) });
+  if (String(data.design || "").trim()) context.push({ category: "design", content: String(data.design) });
+  if (context.length) body.context = context;
   try {
     const res = await api("/api/projects/init", { method: "POST", body: JSON.stringify(body) });
     initDialog.close();
     log(`${t("initRunning")} (job ${res.job})`);
     pollInitJob(res.job);
+  } catch (err) {
+    log(`ERROR: ${err.message}`);
+  }
+});
+
+/* ── Context files (spec / design) manager ── */
+function renderContextList(context) {
+  const cats = ["spec", "design"];
+  const parts = cats.map((cat) => {
+    const files = (context?.[cat] || []);
+    const rows = files.length
+      ? files.map((f) => `<li><code>${esc(f.path)}</code> <span class="muted-line">${f.bytes}B</span></li>`).join("")
+      : `<li class="muted-line">${t("ctxEmpty")}</li>`;
+    return `<div class="ctx-cat"><div class="metrics-subtitle">${cat}</div><ul>${rows}</ul></div>`;
+  });
+  ctxListEl.innerHTML = parts.join("");
+}
+
+async function openContextDialog(projectId) {
+  contextProjectId = projectId;
+  contextForm.reset();
+  ctxListEl.innerHTML = `<div class="muted-line">${t("metricsLoading")}</div>`;
+  contextDialog.showModal();
+  try {
+    const body = await api(`/api/projects/${encodeURIComponent(projectId)}/context`);
+    renderContextList(body.context);
+  } catch (err) {
+    ctxListEl.innerHTML = `<div class="muted-line">ERROR: ${esc(err.message)}</div>`;
+  }
+}
+
+ctxUploadEl.addEventListener("change", async () => {
+  const file = ctxUploadEl.files?.[0];
+  if (!file) return;
+  const text = await file.text();
+  contextForm.querySelector('[name="content"]').value = text;
+  const nameField = contextForm.querySelector('[name="name"]');
+  if (!nameField.value.trim()) nameField.value = file.name.replace(/[^A-Za-z0-9._-]/g, "-");
+});
+
+contextCancelBtn.addEventListener("click", () => contextDialog.close());
+contextForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const data = Object.fromEntries(new FormData(contextForm).entries());
+  const content = String(data.content || "").trim();
+  if (!content) return;
+  const payload = { category: data.category, content: String(data.content), push: false };
+  if (String(data.name || "").trim()) payload.name = String(data.name).trim();
+  try {
+    const body = await api(`/api/projects/${encodeURIComponent(contextProjectId)}/context`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    log(`${t("ctxAdded")} ${body.result?.path || ""}`.trim());
+    contextForm.querySelector('[name="content"]').value = "";
+    contextForm.querySelector('[name="name"]').value = "";
+    ctxUploadEl.value = "";
+    const listBody = await api(`/api/projects/${encodeURIComponent(contextProjectId)}/context`);
+    renderContextList(listBody.context);
   } catch (err) {
     log(`ERROR: ${err.message}`);
   }

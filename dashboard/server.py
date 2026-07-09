@@ -383,6 +383,70 @@ def create_done(project: Project, payload: dict[str, Any]) -> dict[str, Any]:
 INIT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 
 
+CONTEXT_CATEGORIES = ("spec", "design")
+CONTEXT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def sanitize_context_entries(raw: Any) -> list[dict[str, str]]:
+    """Validate a list of {category, name?, content} context entries."""
+    if not isinstance(raw, list):
+        return []
+    entries: list[dict[str, str]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        category = str(item.get("category") or "")
+        content = str(item.get("content") or "")
+        if category not in CONTEXT_CATEGORIES or not content.strip():
+            continue
+        name = str(item.get("name") or "").strip()
+        if name and (not CONTEXT_NAME_RE.fullmatch(name) or "/" in name or ".." in name):
+            raise ValueError(f"invalid context filename: {name}")
+        entry = {"category": category, "content": content}
+        if name:
+            entry["name"] = name
+        entries.append(entry)
+    return entries
+
+
+def run_context(project: Project, body: dict[str, Any]) -> dict[str, Any]:
+    """Add one context file to an existing project via `pevctl context add`."""
+    if PEVCTL_PATH is None:
+        raise FileNotFoundError("pevctl.py not found next to dashboard")
+    entries = sanitize_context_entries([body])
+    if not entries:
+        raise ValueError("category (spec|design) and non-empty content are required")
+    entry = entries[0]
+    argv = [sys.executable, str(PEVCTL_PATH), "context", "add",
+            "--root", str(project.root), "--category", entry["category"],
+            "--content-file", "-"]
+    if entry.get("name"):
+        argv += ["--name", entry["name"]]
+    if body.get("push"):
+        argv += ["--push"]
+    env = dict(os.environ)
+    env["PEV_CLAUDE_BIN"] = env.get("PEV_CLAUDE_BIN", "claude")
+    result = subprocess.run(argv, input=entry["content"], capture_output=True, text=True,
+                            timeout=60, cwd=str(project.root), env=env)
+    if result.returncode != 0:
+        raise ValueError((result.stderr or result.stdout).strip() or "pevctl context failed")
+    append_event(project, "dashboard_context", {"category": entry["category"]})
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    return payload.get("result", payload)
+
+
+def list_context(project: Project) -> dict[str, Any]:
+    if PEVCTL_PATH is None:
+        raise FileNotFoundError("pevctl.py not found next to dashboard")
+    result = subprocess.run(
+        [sys.executable, str(PEVCTL_PATH), "context", "list", "--root", str(project.root)],
+        capture_output=True, text=True, timeout=15,
+    )
+    if result.returncode != 0:
+        raise ValueError((result.stderr or result.stdout).strip() or "pevctl context list failed")
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
 def start_init_job(body: dict[str, Any]) -> dict[str, Any]:
     if PEVCTL_PATH is None:
         raise FileNotFoundError("pevctl.py not found next to dashboard")
@@ -414,6 +478,11 @@ def start_init_job(body: dict[str, Any]) -> dict[str, Any]:
         argv += ["--no-push"]
     job_id = f"{name}-{int(time.time())}"
     INIT_JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    context = sanitize_context_entries(body.get("context"))
+    if context:
+        ctx_path = INIT_JOBS_DIR / f"{job_id}.context.json"
+        ctx_path.write_text(json.dumps(context, ensure_ascii=False), encoding="utf-8")
+        argv += ["--context-json", str(ctx_path)]
     log_path = INIT_JOBS_DIR / f"{job_id}.jsonl"
     with log_path.open("w", encoding="utf-8") as log_fh:
         proc = subprocess.Popen(
@@ -595,6 +664,17 @@ class Handler(BaseHTTPRequestHandler):
             except (OSError, ValueError) as err:
                 self.send_error_json(str(err), 404)
             return
+        match = re.fullmatch(r"/api/projects/([^/]+)/context", path)
+        if match:
+            project = project_by_id(unquote(match.group(1)))
+            if not project:
+                self.send_error_json("Unknown project", 404)
+                return
+            try:
+                self.send_json({"ok": True, **list_context(project)})
+            except (OSError, ValueError, json.JSONDecodeError) as err:
+                self.send_error_json(str(err), 500)
+            return
         match = re.fullmatch(r"/api/projects/([^/]+)/tail", path)
         if match:
             project = project_by_id(unquote(match.group(1)))
@@ -656,7 +736,7 @@ class Handler(BaseHTTPRequestHandler):
             except (OSError, ValueError, json.JSONDecodeError) as err:
                 self.send_error_json(str(err), 400)
             return
-        match = re.fullmatch(r"/api/projects/([^/]+)/(command|meta|done|agent)", path)
+        match = re.fullmatch(r"/api/projects/([^/]+)/(command|meta|done|agent|context)", path)
         if not match:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
@@ -667,6 +747,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             body = self.read_body()
+            if action == "context":
+                result = run_context(project, body)
+                self.send_json({"ok": True, "result": result})
+                return
             if action == "agent":
                 agent = str(body.get("agent") or "")
                 op = str(body.get("op") or "")
