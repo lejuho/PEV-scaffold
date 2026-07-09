@@ -286,6 +286,12 @@ def ensure_first_commit(dest: Path, name: str, log: StepLogger) -> None:
     log.log("initial commit", "README.md")
 
 
+def scaffold_rev() -> str:
+    """Scaffold commit this project was set up against (drift visibility)."""
+    result = run(["git", "rev-parse", "--short", "HEAD"], cwd=SCAFFOLD_ROOT, check=False)
+    return result.stdout.strip() if result.returncode == 0 else "unknown"
+
+
 def inject_artifacts(dest: Path, driver: str, log: StepLogger,
                      claude_model: str = "", claude_effort: str = "") -> tuple[list[str], list[str]]:
     if not TEMPLATE_DIR.is_dir():
@@ -319,11 +325,13 @@ def inject_artifacts(dest: Path, driver: str, log: StepLogger,
     write_if_absent(dest / ".codex" / "hooks.json",
                     json.dumps(CODEX_HOOKS_JSON, ensure_ascii=False, indent=2) + "\n", copied, skipped)
 
-    # self-contained control scripts (hermes bridge + runner)
-    for script_name in ("hermes-cycle-bot.py", "pev_runner.py"):
-        target = dest / "scripts" / script_name
-        if copy_if_absent(SCRIPT_DIR / script_name, target, copied, skipped):
-            make_executable(target)
+    # NOTE: the runner and hermes bridge are NOT copied into the project.
+    # They are operator tooling, not product code. Copying them made every
+    # project carry a stale fork (upstream fixes never propagated), created a
+    # split brain against the dashboard's own runner import, let a cycle edit
+    # the very machinery running it, and — worst — made the Planner read the
+    # injected scripts as the project's subject matter. The project references
+    # the scaffold via projects.json `hermesScript` + HERMES_ROOT instead.
 
     # runtime env for the hermes bridge / runner. Resolve bins to absolute
     # paths (searching common install dirs, not just this process's PATH) so a
@@ -334,6 +342,7 @@ def inject_artifacts(dest: Path, driver: str, log: StepLogger,
         f"HERMES_ROOT={dest}",
         f"HERMES_LOG_DIR={dest / 'logs'}",
         f"PEV_DRIVER={driver}",
+        f"PEV_SCAFFOLD_REV={scaffold_rev()}",
         f"PEV_CLAUDE_BIN={os.environ.get('PEV_CLAUDE_BIN') or resolve_bin('claude')}",
         f"PEV_CODEX_BIN={os.environ.get('PEV_CODEX_BIN') or resolve_bin('codex')}",
         "",
@@ -542,7 +551,7 @@ def register_project(args: argparse.Namespace, dest: Path, log: StepLogger, port
         "id": args.name,
         "name": args.display_name or args.name,
         "root": str(dest),
-        "hermesScript": "scripts/hermes-cycle-bot.py",
+        "hermesScript": str(SCRIPT_DIR / "hermes-cycle-bot.py"),
         "driver": args.driver,
         "port": port,
         "deployScript": "deploy/redeploy.sh",
