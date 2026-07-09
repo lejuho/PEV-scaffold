@@ -99,6 +99,7 @@ class RunnerConfig:
     # headless driver
     claude_model: str = ""
     codex_model: str = ""
+    claude_effort: str = ""  # low|medium|high|xhigh|max (Executor session effort)
     claude_headless_args: str = "--dangerously-skip-permissions"
     codex_headless_args: str = "--dangerously-bypass-approvals-and-sandbox --skip-git-repo-check"
     dry_run: bool = False
@@ -126,6 +127,7 @@ class RunnerConfig:
             claude_args=env.get("PEV_CLAUDE_ARGS", cls.claude_args),
             codex_args=env.get("PEV_CODEX_ARGS", cls.codex_args),
             claude_model=env.get("PEV_CLAUDE_MODEL", ""),
+            claude_effort=env.get("PEV_CLAUDE_EFFORT", ""),
             codex_model=env.get("PEV_CODEX_MODEL", ""),
             claude_headless_args=env.get("PEV_CLAUDE_HEADLESS_ARGS", cls.claude_headless_args),
             codex_headless_args=env.get("PEV_CODEX_HEADLESS_ARGS", cls.codex_headless_args),
@@ -146,6 +148,7 @@ class RunnerConfig:
             ("claude_bin", "claudeBin"),
             ("codex_bin", "codexBin"),
             ("claude_model", "claudeModel"),
+            ("claude_effort", "claudeEffort"),
             ("codex_model", "codexModel"),
             ("claude_headless_args", "claudeHeadlessArgs"),
             ("codex_headless_args", "codexHeadlessArgs"),
@@ -455,6 +458,8 @@ class HeadlessDriver:
             args += shlex.split(self.cfg.claude_headless_args)
             if self.cfg.claude_model:
                 args += ["--model", self.cfg.claude_model]
+            if self.cfg.claude_effort:
+                args += ["--effort", self.cfg.claude_effort]
             sid = entry.get("sessionId")
             if sid:
                 args += ["--resume", str(sid)]

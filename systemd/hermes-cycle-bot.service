@@ -9,6 +9,12 @@ WorkingDirectory=/home/pi/PEV-scaffold
 EnvironmentFile=/home/pi/PEV-scaffold/config/hermes.env
 Environment=PYTHONUNBUFFERED=1
 ExecStart=/usr/bin/python3 /home/pi/PEV-scaffold/scripts/hermes-cycle-bot.py
+# Agent turns (headless `claude -p` / `codex exec`) are spawned as transitive
+# children of this unit and stay in its cgroup — setsid detaches the session,
+# not the cgroup. With the default KillMode=control-group, restarting this
+# service SIGKILLs in-flight agent turns. KillMode=process kills only the main
+# process, so long-running turns survive a restart.
+KillMode=process
 Restart=always
 RestartSec=5
 

@@ -287,7 +287,7 @@ def ensure_first_commit(dest: Path, name: str, log: StepLogger) -> None:
 
 
 def inject_artifacts(dest: Path, driver: str, log: StepLogger,
-                     claude_model: str = "") -> tuple[list[str], list[str]]:
+                     claude_model: str = "", claude_effort: str = "") -> tuple[list[str], list[str]]:
     if not TEMPLATE_DIR.is_dir():
         raise SystemExit(f"template bundle missing: {TEMPLATE_DIR}")
     copied: list[str] = []
@@ -301,6 +301,10 @@ def inject_artifacts(dest: Path, driver: str, log: StepLogger,
                    dest / ".review" / "_templates" / "meta-cycle-template.md", copied, skipped)
 
     copy_if_absent(TEMPLATE_DIR / "CLAUDE.md", dest / ".claude" / "CLAUDE.md", copied, skipped)
+    # Advisor runs as a dedicated subagent: effort can ONLY be set in the
+    # definition file, never per Agent-tool invocation.
+    copy_if_absent(TEMPLATE_DIR / "advisor-agent.md", dest / ".claude" / "agents" / "advisor.md",
+                   copied, skipped)
     for hook in sorted(TEMPLATE_DIR.glob("*.sh")):
         target = dest / ".claude" / "hooks" / hook.name
         if copy_if_absent(hook, target, copied, skipped):
@@ -337,6 +341,7 @@ def inject_artifacts(dest: Path, driver: str, log: StepLogger,
         "# inherits the operator's default model (e.g. an Opus tier), which is the",
         "# wrong cost/role fit for the Executor (CLAUDE.md specifies Sonnet).",
         f"PEV_CLAUDE_MODEL={claude_model or DEFAULT_CLAUDE_MODEL}",
+        f"PEV_CLAUDE_EFFORT={claude_effort or DEFAULT_CLAUDE_EFFORT}",
         "# PEV_CODEX_MODEL=",
         "",
         "# HERMES_TELEGRAM_TOKEN=",
@@ -367,6 +372,9 @@ def inject_artifacts(dest: Path, driver: str, log: StepLogger,
 # Executor role model. Never leave this unset: a headless `claude -p` with no
 # --model inherits the operator's default (possibly an Opus tier).
 DEFAULT_CLAUDE_MODEL = os.environ.get("PEV_DEFAULT_CLAUDE_MODEL", "sonnet")
+# Executor session effort (low|medium|high|xhigh|max). Empty = CLI default.
+# The Advisor subagent gets its own effort from .claude/agents/advisor.md.
+DEFAULT_CLAUDE_EFFORT = os.environ.get("PEV_DEFAULT_CLAUDE_EFFORT", "")
 
 TAILNET_IP = os.environ.get("PEV_TAILNET_IP", "100.96.172.67")
 DEPLOY_PORT_BASE = int(os.environ.get("PEV_DEPLOY_PORT_BASE", "8800"))
@@ -545,6 +553,8 @@ def register_project(args: argparse.Namespace, dest: Path, log: StepLogger, port
     # Always record the model — an unset one means headless inherits the
     # operator's default model, which is the wrong role/cost fit.
     entry["claudeModel"] = args.claude_model or DEFAULT_CLAUDE_MODEL
+    if args.claude_effort or DEFAULT_CLAUDE_EFFORT:
+        entry["claudeEffort"] = args.claude_effort or DEFAULT_CLAUDE_EFFORT
     projects.append(entry)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -596,7 +606,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     port = assign_deploy_port(args)
     acquire_repo(args, dest, log)
     ensure_first_commit(dest, args.name, log)
-    inject_artifacts(dest, args.driver, log, args.claude_model or "")
+    inject_artifacts(dest, args.driver, log, args.claude_model or "", args.claude_effort or "")
     inject_deploy(dest, args.name, port, log)
     if args.stack:
         tailor_agents_md(dest, args.stack, log)
@@ -663,7 +673,9 @@ def main() -> int:
     p.add_argument("--visibility", choices=["private", "public"], default="private")
     p.add_argument("--driver", choices=["headless", "tmux"], default="headless")
     p.add_argument("--stack", help="one-line stack description; tailors AGENTS.md via a cheap model call")
-    p.add_argument("--claude-model", help="model recorded for the dashboard runner config")
+    p.add_argument("--claude-model", help="Executor model (default: sonnet). Never left unset.")
+    p.add_argument("--claude-effort", choices=["low", "medium", "high", "xhigh", "max"],
+                   help="Executor session effort. Advisor effort lives in .claude/agents/advisor.md")
     p.add_argument("--projects-file", help="dashboard projects.json to register into")
     p.add_argument("--context-json", help="path (or '-') to a JSON array of {category,name,content} context files")
     p.add_argument("--no-push", action="store_true")

@@ -63,16 +63,23 @@ HALT: Context budget exceeded (or 5-file rule)
 
 ### 호출 방식
 
-Skill("advisor") 로드 후 Agent tool로 위임:
+`.claude/agents/advisor.md`에 정의된 전용 서브에이전트로 위임:
 
 ```
 Agent({
-  subagent_type: "general-purpose",
-  model: "opus",
+  subagent_type: "advisor",
   description: "Advisor check",
   prompt: "<Approach/Completion/Loop break 질문 그대로>"
 })
 ```
+
+**`model`·`effort`를 호출부에 쓰지 마라.** 둘 다 `advisor.md` frontmatter에서 온다
+(`model: opus`, `effort: high`). Agent tool은 `model`만 호출 시점에 덮어쓸 수 있고
+**`effort`는 정의 파일로만 지정된다** — 인자로 주면 무시되고, 서브에이전트가 Executor
+세션의 effort(예: `--effort low`)를 그대로 상속해 저강도로 돌아간다.
+
+이 분리가 요점이다: Executor는 낮은 effort로 싸게 구현하고, Advisor만 높은 effort로
+검토한다.
 
 응답 제약: 100단어 이내, 단계 나열 (산문 금지).
 
