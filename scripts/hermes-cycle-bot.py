@@ -198,6 +198,55 @@ def git_out(cfg: Config, args: list[str]) -> str | None:
     return result.stdout.strip()
 
 
+# Resolved per project root. The default branch does not change during a run,
+# and probing git on every scan_state would cost three subprocesses a tick.
+_main_branch_cache: dict[str, str] = {}
+
+
+def main_branch(cfg: Config) -> str:
+    """The branch a merged cycle lands on.
+
+    This used to be the literal "master", which silently disabled the entire
+    post-merge phase for any repo on "main": phase never became "merged", so
+    flow full never asked Codex to prepare the next cycle and an operator had to
+    send it by hand every time.
+
+    Resolution order: an explicit mainBranch in projects.json, then origin/HEAD,
+    then whichever of main/master exists locally. The last-resort fallback is
+    the current branch, which during a cycle is a feature branch — never cache
+    that, or the wrong answer sticks for the life of the supervisor.
+    """
+    key = str(cfg.root)
+    cached = _main_branch_cache.get(key)
+    if cached:
+        return cached
+
+    explicit = (cfg.raw or {}).get("mainBranch")
+    if not explicit and cfg.raw is None:
+        # Single-project CLI only: in supervisor mode one env var would name a
+        # branch for every project at once.
+        explicit = os.environ.get("HERMES_MAIN_BRANCH")
+    branch = str(explicit).strip() if explicit else ""
+
+    if not branch:
+        ref = git_out(cfg, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+        if ref and "/" in ref:
+            branch = ref.split("/", 1)[1]
+
+    if not branch:
+        for candidate in ("main", "master"):
+            probe = run_cmd(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{candidate}"], cfg.root)
+            if probe.returncode == 0:
+                branch = candidate
+                break
+
+    if not branch:
+        return git_out(cfg, ["branch", "--show-current"]) or "main"
+
+    _main_branch_cache[key] = branch
+    return branch
+
+
 def latest_cycle(root: Path) -> int | None:
     review_dir = root / ".review"
     if not review_dir.exists():
@@ -338,6 +387,7 @@ def scan_state(cfg: Config) -> CycleState:
     cfg.log_dir.mkdir(parents=True, exist_ok=True)
     cycle = latest_cycle(cfg.root)
     branch_current = git_out(cfg, ["branch", "--show-current"])
+    trunk = main_branch(cfg)
     head = git_out(cfg, ["rev-parse", "--short", "HEAD"])
     status_short = git_out(cfg, ["status", "--short"]) or ""
     git_clean = status_short == ""
@@ -370,8 +420,8 @@ def scan_state(cfg: Config) -> CycleState:
         elif (
             status_value == "ready_to_merge"
             and verdict == "READY_TO_MERGE"
-            and branch_current == "master"
-            and branch_expected not in (None, "master")
+            and branch_current == trunk
+            and branch_expected not in (None, trunk)
         ):
             phase = "merged"
             needs_user = "next cycle decision"
