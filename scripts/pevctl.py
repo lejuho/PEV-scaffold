@@ -55,11 +55,15 @@ CONTEXT_CATEGORIES = {
 CONTEXT_MARKER = "<!-- PEV_CONTEXT_POINTER -->"
 CONTEXT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
+# force-advisor-check.sh is deliberately absent: the Step Advisor is the
+# Executor's obligation (AGENTS.md role table), and Codex runs as Planner and
+# Cycle Reviewer. Its Stop hook treats any staged file as a code change, so the
+# Planner tripped it on the very plan.md it exists to write, then called an
+# Advisor to escape the block.
 CODEX_HOOKS = [
     "block-dangerous.sh",
     "track-failures.sh",
     "auto-format.sh",
-    "force-advisor-check.sh",
     "check-cycle-cap.sh",
 ]
 
@@ -103,7 +107,6 @@ CODEX_HOOKS_JSON = {
         ],
         "Stop": [
             {"hooks": [
-                {"type": "command", "command": ".codex/hooks/force-advisor-check.sh"},
                 {"type": "command", "command": ".codex/hooks/check-cycle-cap.sh"},
             ]}
         ],
