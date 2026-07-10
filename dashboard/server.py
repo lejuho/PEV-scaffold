@@ -325,7 +325,7 @@ def command_allowed(command: str) -> bool:
     if base not in SAFE_COMMANDS:
         return False
     if base == "/flow":
-        return len(parts) <= 2 and (len(parts) == 1 or parts[1] in {"status", "state", "safe", "on", "full", "off", "stop", "step"})
+        return len(parts) <= 2 and (len(parts) == 1 or parts[1] in {"status", "state", "safe", "on", "full", "off", "stop", "step", "reset"})
     if base == "/enter":
         return len(parts) == 2 and parts[1] in {"claude", "codex"}
     if base == "/say":

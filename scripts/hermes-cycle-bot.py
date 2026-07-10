@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import re
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,7 +49,7 @@ BOT_COMMANDS = [
     {"command": "recheck", "description": "Codex에 재검증 요청"},
     {"command": "fix", "description": "Claude에 최신 review 수정 요청"},
     {"command": "merge", "description": "ready_to_merge일 때 Codex에 머지 요청"},
-    {"command": "flow", "description": "cycle 자동 흐름: /flow safe|full|off|status|step"},
+    {"command": "flow", "description": "cycle 자동 흐름: /flow safe|full|off|status|step|reset"},
     {"command": "project", "description": "대상 프로젝트 조회/전환: /project [id]"},
     {"command": "enter", "description": "현재 pane 입력창 제출: /enter codex|claude"},
     {"command": "hold", "description": "Hermes 자동 조작 정지"},
@@ -447,14 +449,19 @@ def default_flow_state() -> dict[str, Any]:
     }
 
 
-def load_flow_state(cfg: Config) -> dict[str, Any]:
-    path = flow_file(cfg)
-    if not path.exists():
-        return default_flow_state()
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        data = {}
+# The flow file has two writers: the supervisor's tick and the short-lived
+# `--command` process the dashboard spawns per button press. Each did a plain
+# read-modify-write, so a tick that loaded the file before a `/flow full` landed
+# would write its stale copy back and silently revert the mode.
+#
+# Ownership makes the merge unambiguous: `mode` is set by commands only, every
+# other field by the flow engine only. A writer persists just the fields it owns,
+# under an exclusive lock, and the file is replaced atomically so no reader ever
+# sees a half-written JSON.
+FLOW_COMMAND_OWNED_KEYS = ("mode",)
+
+
+def _normalize_flow(data: Any) -> dict[str, Any]:
     base = default_flow_state()
     if isinstance(data, dict):
         base.update(data)
@@ -467,10 +474,55 @@ def load_flow_state(cfg: Config) -> dict[str, Any]:
     return base
 
 
-def save_flow_state(cfg: Config, flow: dict[str, Any]) -> None:
+def _read_flow_unlocked(cfg: Config) -> dict[str, Any]:
+    path = flow_file(cfg)
+    if not path.exists():
+        return default_flow_state()
+    try:
+        return _normalize_flow(json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError):
+        return default_flow_state()
+
+
+@contextmanager
+def flow_lock(cfg: Config):
     cfg.log_dir.mkdir(parents=True, exist_ok=True)
-    flow["updated_at"] = utc_now()
-    flow_file(cfg).write_text(json.dumps(flow, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    lock_path = flow_file(cfg).with_suffix(".lock")
+    with open(lock_path, "w", encoding="utf-8") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def load_flow_state(cfg: Config) -> dict[str, Any]:
+    return _read_flow_unlocked(cfg)
+
+
+def save_flow_state(cfg: Config, flow: dict[str, Any], *, owns_mode: bool = False) -> None:
+    """Persist only the fields this writer owns, merged onto the current file.
+
+    owns_mode=True marks the caller as the command path (set_flow_mode): it
+    writes `mode` and nothing else. Everyone else is the flow engine: it writes
+    everything except `mode`.
+    """
+    with flow_lock(cfg):
+        disk = _read_flow_unlocked(cfg)
+        if owns_mode:
+            disk["mode"] = flow.get("mode", disk.get("mode", "off"))
+        else:
+            for key, value in flow.items():
+                if key not in FLOW_COMMAND_OWNED_KEYS:
+                    disk[key] = value
+        disk["updated_at"] = utc_now()
+        path = flow_file(cfg)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(disk, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+    # Let the caller's in-memory copy see fields it does not own but did not write.
+    for key in FLOW_COMMAND_OWNED_KEYS:
+        flow[key] = disk[key]
 
 
 def log_event(cfg: Config, event: str, data: dict[str, Any]) -> None:
@@ -740,9 +792,28 @@ def flow_status_text(cfg: Config, state: CycleState) -> str:
 
 
 def set_flow_mode(cfg: Config, mode: str) -> str:
+    """Change the mode and nothing else.
+
+    This used to clear last_action_key and processed_done_files as a "fresh
+    start". But those are the flow's idempotency guards: wiping them makes it
+    forget that it already sent 머지하라 or already fed a done file to Codex, so
+    flipping safe→full right after a manual merge re-sent the merge prompt
+    seconds later. Mode is the only field a command owns.
+    """
+    flow = load_flow_state(cfg)
+    flow["mode"] = mode
+    save_flow_state(cfg, flow, owns_mode=True)
+    return _flow_mode_reply(mode)
+
+
+def reset_flow_state(cfg: Config) -> str:
+    """Clear the engine's progress memory, keeping the mode.
+
+    Mode changes used to do this implicitly, which is how an operator unstuck a
+    flow parked on a stale waiting_for. Now that the guards survive a mode flip,
+    the escape hatch has to be asked for."""
     flow = load_flow_state(cfg)
     flow.update({
-        "mode": mode,
         "waiting_for": None,
         "saw_busy": False,
         "last_action_key": None,
@@ -752,6 +823,10 @@ def set_flow_mode(cfg: Config, mode: str) -> str:
         "processed_done_files": [],
     })
     save_flow_state(cfg, flow)
+    return f"Flow progress reset. Mode stays {flow.get('mode', 'off')}."
+
+
+def _flow_mode_reply(mode: str) -> str:
     if mode == "off":
         return "Flow stopped."
     if mode == "safe":
@@ -764,6 +839,25 @@ def mark_flow_action(flow: dict[str, Any], key: str, waiting_for: str | None = N
     flow["waiting_for"] = waiting_for
     flow["saw_busy"] = False
     flow["last_action_at"] = utc_now()
+
+
+def paste_delivered(reply: str) -> bool:
+    """False when the pane had to be (re)created, so the text never reached the CLI."""
+    return "resend in a few seconds" not in reply
+
+
+def stamp_manual_action(cfg: Config, key: str, waiting_for: str, review_from: str | None = None) -> None:
+    """Record a hand-issued command under the key the flow would have used.
+
+    Manual /merge used to leave the flow state untouched, so the next tick still
+    saw the transition as pending and sent its own 머지하라 — Codex received the
+    prompt twice, seconds apart. Sharing the key makes the flow's existing
+    dedupe cover operator actions too."""
+    flow = load_flow_state(cfg)
+    if review_from is not None:
+        flow["waiting_for_review_from"] = review_from
+    mark_flow_action(flow, key, waiting_for)
+    save_flow_state(cfg, flow)
 
 
 def flow_idle_grace_elapsed(flow: dict[str, Any]) -> bool:
@@ -1118,6 +1212,7 @@ def help_text(state: CycleState) -> str:
         "/flow safe — 구현→검증→수정→재검증 자동, merge 앞에서 정지\n"
         "/flow full — safe + merge + 다음 cycle 준비까지 자동\n"
         "/flow step — 현재 상태에서 가능한 다음 단계 1회 강제 시도\n"
+        "/flow reset — 진행 기억(waiting_for·중복 가드) 초기화, 모드는 유지\n"
         "/flow off — 자동 흐름 정지\n\n"
         "Manual intervention\n"
         "/say claude <text> — Claude pane에 직접 지시\n"
@@ -1213,16 +1308,24 @@ def handle_command(cfg: Config, text: str, state: CycleState) -> str:
     if command == "/remaining":
         return paste_to_pane(cfg, "codex", "남은 구현 스펙", "Codex")
     if command == "/prepare_next":
-        return paste_to_pane(cfg, "codex", "그것으로 사이클 준비", "Codex")
+        reply = paste_to_pane(cfg, "codex", "그것으로 사이클 준비", "Codex")
+        if state.cycle is not None and paste_delivered(reply):
+            stamp_manual_action(cfg, f"cycle-{state.cycle}:next_cycle", "codex_next_cycle")
+        return reply
     if command == "/implement":
         prompt, err = build_implement_prompt(cfg, state)
         if err:
             return err
-        return paste_to_pane(cfg, "claude", prompt or "", "Claude")
-    if command == "/review":
-        return paste_to_pane(cfg, "codex", "구현 검증", "Codex")
-    if command == "/recheck":
-        return paste_to_pane(cfg, "codex", "재검증", "Codex")
+        reply = paste_to_pane(cfg, "claude", prompt or "", "Claude")
+        if state.cycle is not None and paste_delivered(reply):
+            stamp_manual_action(cfg, f"cycle-{state.cycle}:implement", "claude_implement")
+        return reply
+    if command in {"/review", "/recheck"}:
+        prompt = "구현 검증" if command == "/review" else "재검증"
+        reply = paste_to_pane(cfg, "codex", prompt, "Codex")
+        if state.cycle is not None and paste_delivered(reply):
+            stamp_manual_action(cfg, f"cycle-{state.cycle}:codex:{prompt}", "codex_review", state.latest_review)
+        return reply
     if command == "/fix":
         review = state.latest_review or "latest review"
         prompt_parts = [
@@ -1232,11 +1335,17 @@ def handle_command(cfg: Config, text: str, state: CycleState) -> str:
             pass_no = expected_done_pass(state) or ((review_number(state.latest_review) or 0) + 1)
             prompt_parts.append(executor_done_instruction(state.cycle, pass_no, "fix", state.latest_review))
         prompt = "\n\n".join(prompt_parts)
-        return paste_to_pane(cfg, "claude", prompt, "Claude")
+        reply = paste_to_pane(cfg, "claude", prompt, "Claude")
+        if state.cycle is not None and state.latest_review and paste_delivered(reply):
+            stamp_manual_action(cfg, f"cycle-{state.cycle}:fix:{state.latest_review}", "claude_fix")
+        return reply
     if command == "/merge":
         if state.phase != "ready_to_merge":
             return f"Refused: phase is {state.phase}, not ready_to_merge"
-        return paste_to_pane(cfg, "codex", "머지하라", "Codex")
+        reply = paste_to_pane(cfg, "codex", "머지하라", "Codex")
+        if state.cycle is not None and paste_delivered(reply):
+            stamp_manual_action(cfg, f"cycle-{state.cycle}:merge:{state.latest_review or '-'}", "codex_merge")
+        return reply
     if command == "/flow":
         action = parts[1].lower() if len(parts) >= 2 else "status"
         if action in {"status", "state"}:
@@ -1250,7 +1359,9 @@ def handle_command(cfg: Config, text: str, state: CycleState) -> str:
         if action == "step":
             reply = maybe_advance_flow(cfg, state, force=True)
             return reply or "Flow step: no available transition"
-        return "Usage: /flow safe|full|off|status|step"
+        if action == "reset":
+            return reset_flow_state(cfg)
+        return "Usage: /flow safe|full|off|status|step|reset"
     if command == "/hold":
         cfg.log_dir.mkdir(parents=True, exist_ok=True)
         hold_file(cfg).write_text(utc_now() + "\n", encoding="utf-8")
