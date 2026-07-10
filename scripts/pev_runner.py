@@ -469,6 +469,16 @@ class TmuxDriver:
             return f"{agent}: kill-session failed: {(result.stderr or '').strip()}"
         return f"{agent}: tmux session {session} stopped (conversation kept on disk)"
 
+    def session_exists(self, agent: str) -> bool:
+        """Does the tmux session exist, regardless of whether the CLI still runs?
+
+        `alive` is the wrong question when tearing a project down: a pane whose
+        CLI exited still holds a session that should be reclaimed."""
+        session = self._session_name(agent)
+        if not session:
+            return False
+        return self._run(["tmux", "has-session", "-t", session]).returncode == 0
+
     def status(self, agent: str) -> dict[str, Any]:
         pane = self._pane(agent)
         session = self._session_name(agent)
@@ -662,6 +672,10 @@ class HeadlessDriver:
         self.store.update(agent, status="idle", pid=None, stoppedAt=utc_now())
         return f"{agent}: turn stopped (session {entry.get('sessionId')} kept; resume with next send)"
 
+    def session_exists(self, agent: str) -> bool:
+        """Headless agents own no long-lived session; there is nothing to reclaim."""
+        return False
+
     def status(self, agent: str) -> dict[str, Any]:
         entry = self._refresh(agent)
         return {
@@ -800,6 +814,9 @@ class AgentRunner:
 
     def stop(self, agent: str) -> str:
         return self.driver.stop(agent)
+
+    def session_exists(self, agent: str) -> bool:
+        return self.driver.session_exists(agent)
 
     def status(self, agent: str) -> dict[str, Any]:
         return self.driver.status(agent)

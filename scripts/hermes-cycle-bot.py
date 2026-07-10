@@ -25,6 +25,17 @@ from pev_runner import AgentRunner, RunnerConfig  # noqa: E402
 VERDICTS = ("BLOCKED", "PASS", "READY_TO_MERGE")
 EXECUTOR_DONE_RE = re.compile(r"pass-(\d+)-done\.json")
 
+# Supervisor mode reads the dashboard's project registry so both agree on which
+# projects exist and which are archived. state.json is written by the dashboard.
+PROJECTS_PATH = Path(os.environ.get("PEV_PROJECTS", "/home/pi/PEV-dashboard/projects.json"))
+DASHBOARD_STATE_PATH = Path(os.environ.get("PEV_STATE", "/home/pi/PEV-dashboard/state.json"))
+SUPERVISOR_STATE_PATH = Path(os.environ.get("PEV_SUPERVISOR_STATE", "/home/pi/PEV-dashboard/supervisor.json"))
+
+# Set by supervisor_loop(). The Telegram update offset must be process-global:
+# one getUpdates consumer, one cursor. Keeping it per-project would replay old
+# updates every time the operator switched projects with /project.
+SUPERVISOR_MODE = False
+
 BOT_COMMANDS = [
     {"command": "status", "description": "현재 cycle 상태"},
     {"command": "menu", "description": "누르는 Hermes 버튼"},
@@ -37,6 +48,7 @@ BOT_COMMANDS = [
     {"command": "fix", "description": "Claude에 최신 review 수정 요청"},
     {"command": "merge", "description": "ready_to_merge일 때 Codex에 머지 요청"},
     {"command": "flow", "description": "cycle 자동 흐름: /flow safe|full|off|status|step"},
+    {"command": "project", "description": "대상 프로젝트 조회/전환: /project [id]"},
     {"command": "enter", "description": "현재 pane 입력창 제출: /enter codex|claude"},
     {"command": "hold", "description": "Hermes 자동 조작 정지"},
     {"command": "resume", "description": "Hermes hold 해제"},
@@ -59,6 +71,11 @@ class Config:
     submit_delay: float
     dry_run: bool
     driver: str = "tmux"
+    # Supervisor mode only. `label` disambiguates Telegram notices once more than
+    # one project can emit them; `raw` is the projects.json entry, which carries
+    # per-project model/effort/args that the env-based config cannot express.
+    label: str = ""
+    raw: dict[str, Any] | None = None
 
 
 @dataclass
@@ -112,6 +129,60 @@ def config_from_env(args: argparse.Namespace) -> Config:
         dry_run=args.dry_run,
         driver=os.environ.get("PEV_DRIVER", "tmux").strip() or "tmux",
     )
+
+
+def _read_json(path: Path, default: Any) -> Any:
+    if not path.exists():
+        return default
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return default
+
+
+def config_from_project(item: dict[str, Any], args: argparse.Namespace) -> Config:
+    """Build a per-project Config. Telegram credentials and poll cadence stay
+    process-global: there is exactly one bot token and one getUpdates consumer."""
+    root = Path(str(item["root"])).expanduser().resolve()
+    log_dir = Path(str(item.get("logDir") or root / "logs")).resolve()
+    return Config(
+        root=root,
+        log_dir=log_dir,
+        token=os.environ.get("HERMES_TELEGRAM_TOKEN", ""),
+        chat_id=os.environ.get("HERMES_CHAT_ID", ""),
+        claude_pane=str(item.get("claudePane") or ""),
+        codex_pane=str(item.get("codexPane") or ""),
+        poll_seconds=int(os.environ.get("HERMES_POLL_SECONDS", args.poll_seconds)),
+        submit_key=os.environ.get("HERMES_SUBMIT_KEY", "C-m"),
+        submit_delay=float(os.environ.get("HERMES_SUBMIT_DELAY", "0.35")),
+        dry_run=args.dry_run,
+        driver=str(item.get("driver") or "tmux"),
+        label=str(item.get("name") or item["id"]),
+        raw=dict(item),
+    )
+
+
+@dataclass
+class ProjectEntry:
+    id: str
+    label: str
+    cfg: Config
+    archived: bool
+
+
+def load_project_entries(args: argparse.Namespace) -> list[ProjectEntry]:
+    registry = _read_json(PROJECTS_PATH, {"projects": []})
+    meta = (_read_json(DASHBOARD_STATE_PATH, {}) or {}).get("projects") or {}
+    entries: list[ProjectEntry] = []
+    for item in registry.get("projects", []):
+        try:
+            pid = str(item["id"])
+            cfg = config_from_project(item, args)
+        except (KeyError, TypeError, ValueError):
+            continue
+        archived = bool((meta.get(pid) or {}).get("archived"))
+        entries.append(ProjectEntry(id=pid, label=cfg.label, cfg=cfg, archived=archived))
+    return entries
 
 
 def run_cmd(args: list[str], cwd: Path, timeout: int = 10, check: bool = False) -> subprocess.CompletedProcess[str]:
@@ -501,7 +572,25 @@ def send_menu(cfg: Config, state: CycleState) -> None:
     send_telegram(cfg, f"Hermes menu\n\n{format_status(state)}", reply_markup=menu_markup(state))
 
 
+def load_supervisor_state() -> dict[str, Any]:
+    if not SUPERVISOR_STATE_PATH.exists():
+        return {}
+    try:
+        data = json.loads(SUPERVISOR_STATE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_supervisor_state(data: dict[str, Any]) -> None:
+    SUPERVISOR_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SUPERVISOR_STATE_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
 def read_offset(cfg: Config) -> int | None:
+    if SUPERVISOR_MODE:
+        value = load_supervisor_state().get("offset")
+        return int(value) if isinstance(value, int) else None
     path = offset_path(cfg)
     if not path.exists():
         return None
@@ -510,6 +599,11 @@ def read_offset(cfg: Config) -> int | None:
 
 
 def write_offset(cfg: Config, offset: int) -> None:
+    if SUPERVISOR_MODE:
+        data = load_supervisor_state()
+        data["offset"] = offset
+        save_supervisor_state(data)
+        return
     cfg.log_dir.mkdir(parents=True, exist_ok=True)
     offset_path(cfg).write_text(str(offset) + "\n", encoding="utf-8")
 
@@ -534,18 +628,41 @@ def get_updates(cfg: Config, once: bool) -> list[dict[str, Any]]:
 # All agent interaction goes through pev_runner (tmux or headless driver).
 # Agents are addressed by name ("claude" / "codex"), no longer by pane string.
 
-_runner: AgentRunner | None = None
+_runners: dict[tuple[str, bool], AgentRunner] = {}
 
 
 def get_runner(cfg: Config) -> AgentRunner:
-    global _runner
-    if _runner is None or _runner.cfg.dry_run != cfg.dry_run:
+    """One runner per (project root, dry_run).
+
+    Keyed by root because the supervisor drives several projects from a single
+    process: a module-wide singleton would route every project's prompts into
+    whichever project happened to build it first.
+    """
+    key = (str(cfg.root), cfg.dry_run)
+    runner = _runners.get(key)
+    if runner is not None:
+        return runner
+    if cfg.raw is not None:
+        rc = RunnerConfig.from_project(cfg.raw)
+        rc.dry_run = cfg.dry_run
+    else:
         rc = RunnerConfig.from_env(cfg.root, dry_run=cfg.dry_run)
-        rc.root = cfg.root
-        rc.log_dir = cfg.log_dir
-        rc.driver = cfg.driver
-        _runner = AgentRunner(rc)
-    return _runner
+    rc.root = cfg.root
+    rc.log_dir = cfg.log_dir
+    rc.driver = cfg.driver
+    if cfg.claude_pane:
+        rc.claude_pane = cfg.claude_pane
+    if cfg.codex_pane:
+        rc.codex_pane = cfg.codex_pane
+    # Sessions are derived from the panes, never inherited from the environment:
+    # PEV_CLAUDE_SESSION in the unit's EnvironmentFile names *one* project, so
+    # honoring it here would aim every project at that project's tmux sessions.
+    # Derivation also preserves historical names like cairn's "codex-hermes".
+    rc.claude_session = ""
+    rc.codex_session = ""
+    runner = AgentRunner(rc)
+    _runners[key] = runner
+    return runner
 
 
 def capture_pane(cfg: Config, agent: str, lines: int = 80) -> str:
@@ -661,11 +778,15 @@ def flow_idle_grace_elapsed(flow: dict[str, Any]) -> bool:
     return elapsed.total_seconds() >= FLOW_IDLE_GRACE_SECONDS
 
 
+def tagged(cfg: Config, message: str) -> str:
+    return f"[{cfg.label}] {message}" if cfg.label else message
+
+
 def send_flow_notice(cfg: Config, flow: dict[str, Any], key: str, message: str) -> None:
     if flow.get("last_notice_key") == key:
         return
     flow["last_notice_key"] = key
-    send_telegram(cfg, message)
+    send_telegram(cfg, tagged(cfg, message))
 
 
 def flow_send_review(cfg: Config, flow: dict[str, Any], state: CycleState, prompt: str) -> str:
@@ -975,6 +1096,9 @@ def help_text(state: CycleState) -> str:
     merge_line = "available" if state.phase == "ready_to_merge" else f"blocked now: phase={state.phase}"
     return (
         "Hermes command help\n\n"
+        "Projects\n"
+        "/project — 프로젝트 목록과 현재 대상 표시\n"
+        "/project <id> — 이후 모든 명령의 대상 전환\n\n"
         "Status / observation\n"
         "/status — 현재 cycle, phase, verdict, branch, clean 상태\n"
         "/cycle — /status alias\n"
@@ -1208,7 +1332,7 @@ def notify_if_changed(cfg: Config, previous: dict[str, Any] | None, state: Cycle
         return
     if previous.get("phase") == state.phase and previous.get("latest_review") == state.latest_review:
         return
-    msg = f"Hermes cycle state changed\n\n{format_status(state)}"
+    msg = tagged(cfg, f"Hermes cycle state changed\n\n{format_status(state)}")
     log_event(
         cfg,
         "state_changed",
@@ -1306,15 +1430,178 @@ def record_metric_events(cfg: Config, state: CycleState) -> None:
         save_flow_state(cfg, flow)
 
 
-def tick(cfg: Config, once: bool) -> CycleState:
+def project_tick(cfg: Config) -> CycleState:
+    """Scan + notify + metrics for one project. No Telegram polling: in
+    supervisor mode a single consumer drains getUpdates for all projects."""
     previous = load_previous_state(cfg)
     state = scan_state(cfg)
     save_state(cfg, state)
     notify_if_changed(cfg, previous, state)
     record_metric_events(cfg, state)
+    return state
+
+
+def tick(cfg: Config, once: bool) -> CycleState:
+    state = project_tick(cfg)
     process_updates(cfg, state, once=once)
     maybe_advance_flow(cfg, state, force=False)
     return state
+
+
+# --- supervisor ------------------------------------------------------------
+
+LOOP_ERRORS = (OSError, RuntimeError, ValueError, subprocess.SubprocessError, error.URLError, TimeoutError)
+
+
+def project_list_text(entries: list[ProjectEntry], current_id: str | None) -> str:
+    lines = ["Projects:"]
+    for entry in entries:
+        marker = "→" if entry.id == current_id else " "
+        suffix = " (archived)" if entry.archived else ""
+        lines.append(f"{marker} {entry.id}{suffix}")
+    lines.append("")
+    lines.append("Switch with: /project <id>")
+    return "\n".join(lines)
+
+
+def handle_project_command(entries: list[ProjectEntry], current_id: str | None, text: str) -> tuple[str, str | None]:
+    parts = text.strip().split()
+    if len(parts) < 2:
+        return project_list_text(entries, current_id), current_id
+    target = parts[1].strip().lower()
+    match = next((e for e in entries if e.id.lower() == target), None)
+    if match is None:
+        return f"Unknown project: {parts[1]}\n\n{project_list_text(entries, current_id)}", current_id
+    if match.archived:
+        return f"Refused: {match.id} is archived. Unarchive it from the dashboard first.", current_id
+    data = load_supervisor_state()
+    data["currentProject"] = match.id
+    save_supervisor_state(data)
+    return f"Current project → {match.id}", match.id
+
+
+def update_text(update: dict[str, Any]) -> str:
+    callback = update.get("callback_query")
+    if callback:
+        return str(callback.get("data") or "").strip()
+    message = update.get("message") or update.get("edited_message") or {}
+    return str(message.get("text", "")).strip()
+
+
+def supervisor_process_updates(
+    entries: list[ProjectEntry],
+    active: list[ProjectEntry],
+    current_id: str | None,
+    states: dict[str, CycleState],
+    once: bool,
+) -> str | None:
+    """Drain Telegram once and route each update to the current project.
+
+    /project is handled here rather than in handle_command because switching is
+    a supervisor concern: handle_command only ever sees one project's Config."""
+    telegram_cfg = next((e.cfg for e in active if e.id == current_id), None)
+    if telegram_cfg is None:
+        telegram_cfg = active[0].cfg if active else entries[0].cfg
+    for update in get_updates(telegram_cfg, once=once):
+        text = update_text(update)
+        callback = update.get("callback_query")
+        if text.split(maxsplit=1)[:1] == ["/project"]:
+            reply, current_id = handle_project_command(entries, current_id, text)
+            if callback:
+                answer_callback(telegram_cfg, str(callback.get("id")))
+            send_telegram(telegram_cfg, reply)
+            continue
+        current = next((e for e in active if e.id == current_id), None)
+        if current is None:
+            send_telegram(telegram_cfg, "No active project. Unarchive one from the dashboard.")
+            continue
+        state = states.get(current.id)
+        if state is None:
+            state = scan_state(current.cfg)
+        if callback:
+            process_callback(current.cfg, callback, state)
+        else:
+            process_message(current.cfg, update.get("message") or update.get("edited_message") or {}, state)
+    return current_id
+
+
+def reconcile_archived(entry: ProjectEntry) -> list[str]:
+    """An archived project owns no tmux sessions.
+
+    Enforced every tick rather than only at the moment the dashboard archives,
+    so the invariant also holds for projects archived before this wiring existed
+    and for sessions revived by hand. stop() kills the session but leaves the
+    agent's conversation on disk, so unarchiving resumes where it left off.
+    Keyed on session_exists, not alive: a pane whose CLI already exited still
+    holds a session worth reclaiming. Headless projects own none.
+    """
+    runner = get_runner(entry.cfg)
+    stopped: list[str] = []
+    for agent in ("claude", "codex"):
+        if not runner.session_exists(agent):
+            continue
+        result = runner.stop(agent)
+        stopped.append(agent)
+        log_event(entry.cfg, "archived_agent_stopped", {"agent": agent, "result": result})
+    return stopped
+
+
+def supervisor_loop(args: argparse.Namespace) -> int:
+    global SUPERVISOR_MODE
+    SUPERVISOR_MODE = True
+    poll = int(os.environ.get("HERMES_POLL_SECONDS", args.poll_seconds))
+    print(f"Hermes supervisor running. registry={PROJECTS_PATH} poll={poll}s dry_run={args.dry_run}")
+    while True:
+        entries = load_project_entries(args)
+        active = [e for e in entries if not e.archived]
+        supervisor = load_supervisor_state()
+        current_id = supervisor.get("currentProject")
+        if current_id not in {e.id for e in active}:
+            current_id = active[0].id if active else None
+            supervisor["currentProject"] = current_id
+            save_supervisor_state(supervisor)
+
+        for entry in entries:
+            if not entry.archived:
+                continue
+            try:
+                stopped = reconcile_archived(entry)
+            except LOOP_ERRORS as err:
+                log_event(entry.cfg, "loop_error", {"stage": "reconcile", "error": str(err)})
+                continue
+            if stopped:
+                send_telegram(entry.cfg, tagged(entry.cfg, f"Archived: stopped {', '.join(stopped)} session(s)."))
+
+        states: dict[str, CycleState] = {}
+        for entry in active:
+            try:
+                entry.cfg.log_dir.mkdir(parents=True, exist_ok=True)
+                states[entry.id] = project_tick(entry.cfg)
+            except LOOP_ERRORS as err:
+                log_event(entry.cfg, "loop_error", {"stage": "scan", "error": str(err)})
+
+        if entries:
+            try:
+                current_id = supervisor_process_updates(entries, active, current_id, states, once=args.once)
+            except LOOP_ERRORS as err:
+                print(f"supervisor telegram error: {err}", file=sys.stderr)
+
+        for entry in active:
+            state = states.get(entry.id)
+            if state is None:
+                continue
+            try:
+                maybe_advance_flow(entry.cfg, state, force=False)
+            except LOOP_ERRORS as err:
+                log_event(entry.cfg, "loop_error", {"stage": "flow", "error": str(err)})
+
+        if args.once:
+            for entry in active:
+                state = states.get(entry.id)
+                print(f"--- {entry.id} ---")
+                print(format_status(state) if state else "(scan failed)")
+            return 0
+        time.sleep(poll)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1329,6 +1616,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("message", nargs="*", help="message used with --send")
     parser.add_argument("--dry-run", action="store_true", help="do not send Telegram or tmux actions")
     parser.add_argument("--poll-seconds", type=int, default=5)
+    parser.add_argument(
+        "--supervisor",
+        action="store_true",
+        help="drive every non-archived project in projects.json from one process",
+    )
     return parser
 
 
@@ -1337,6 +1629,9 @@ def main() -> int:
     args = parser.parse_args()
     cfg = config_from_env(args)
     cfg.log_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.supervisor:
+        return supervisor_loop(args)
 
     if args.status:
         state = scan_state(cfg)
