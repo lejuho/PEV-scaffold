@@ -344,6 +344,68 @@ def executor_done_instruction(cycle: int, pass_no: int, kind: str, review: str |
     return "\n".join(fields)
 
 
+SPEC_REQ_MARKER = re.compile(r"<!--\s*SPEC-REQ\s*-->", re.IGNORECASE)
+SPEC_DECISION_MARKER = re.compile(r"<!--\s*SPEC-DECISION\s*-->", re.IGNORECASE)
+SPEC_CHECKBOX = re.compile(r"^\s*[-*]\s*\[(?P<mark>[ xX])\]\s*(?P<text>.*)$")
+SPEC_HEADING = re.compile(r"^#{1,6}\s")
+
+
+def spec_completion_state(cfg: Config) -> dict[str, Any] | None:
+    """Decide, from the spec alone, whether the project has run out of work.
+
+    Deterministic on purpose: a "project done, stop automating" signal must not
+    ride on the model's judgment. Two opt-in markers scope which checkboxes
+    count — `<!-- SPEC-REQ -->` for implementation, `<!-- SPEC-DECISION -->` for
+    calls only a human makes. A marker's scope runs until the next marker or the
+    next heading, so checkboxes elsewhere are ignored.
+
+    Returns None when the convention is absent (no SPEC-REQ marker anywhere) —
+    which is every project that predates it, so their flow is unchanged. Once
+    every requirement is checked: `needs_decision` if open decisions remain
+    (the engine must never resolve those itself), else `spec_complete`.
+    """
+    spec_rel = str((cfg.raw or {}).get("specPath") or "docs/spec/spec.md")
+    spec_path = cfg.root / spec_rel
+    if not spec_path.exists():
+        return None
+    try:
+        lines = spec_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+
+    scope: str | None = None
+    saw_req_marker = False
+    open_req = 0
+    open_decisions: list[str] = []
+    for line in lines:
+        if SPEC_REQ_MARKER.search(line):
+            scope = "req"
+            saw_req_marker = True
+            continue
+        if SPEC_DECISION_MARKER.search(line):
+            scope = "decision"
+            continue
+        if SPEC_HEADING.match(line):
+            scope = None
+            continue
+        box = SPEC_CHECKBOX.match(line)
+        if not box or scope is None:
+            continue
+        if box.group("mark") == " ":
+            if scope == "req":
+                open_req += 1
+            else:
+                open_decisions.append(box.group("text").strip())
+
+    if not saw_req_marker:
+        return None
+    if open_req > 0:
+        return None
+    if open_decisions:
+        return {"state": "needs_decision", "items": open_decisions}
+    return {"state": "spec_complete", "items": []}
+
+
 def processed_done_files(flow: dict[str, Any]) -> list[str]:
     raw = flow.get("processed_done_files")
     return [str(x) for x in raw] if isinstance(raw, list) else []
@@ -495,6 +557,11 @@ def default_flow_state() -> dict[str, Any]:
         "waiting_for_review_from": None,
         "processed_done_files": [],
         "last_metric_keys": {},
+        # Sticky terminal state set by the engine when the spec is exhausted:
+        # None | {"state": "spec_complete"|"needs_decision", "items": [...]}. It
+        # deliberately outlives mode changes — completion is not undone by /flow
+        # full — and is cleared only by /flow reset.
+        "halt": None,
         "updated_at": utc_now(),
     }
 
@@ -821,9 +888,12 @@ def flow_status_text(cfg: Config, state: CycleState) -> str:
     codex_idle = agent_idle(cfg, "codex")
     done_pass = expected_done_pass(state)
     pending_done = find_executor_done(cfg, state, done_pass, flow) if done_pass is not None else None
+    halt = flow.get("halt")
+    halt_line = f"{halt['state']} ({len(halt.get('items', []))} open decisions)" if isinstance(halt, dict) else "-"
     return "\n".join(
         [
             f"Flow mode: {flow.get('mode', 'off')}",
+            f"Halted: {halt_line}",
             f"Waiting for: {flow.get('waiting_for') or '-'}",
             f"Saw busy: {'yes' if flow.get('saw_busy') else 'no'}",
             f"Last action: {flow.get('last_action_key') or '-'}",
@@ -871,6 +941,7 @@ def reset_flow_state(cfg: Config) -> str:
         "last_action_at": None,
         "waiting_for_review_from": None,
         "processed_done_files": [],
+        "halt": None,
     })
     save_flow_state(cfg, flow)
     return f"Flow progress reset. Mode stays {flow.get('mode', 'off')}."
@@ -990,6 +1061,12 @@ def maybe_advance_flow(cfg: Config, state: CycleState, force: bool = False) -> s
     if state.phase == "escalated":
         send_flow_notice(cfg, flow, f"cycle-{state.cycle}:escalated", "Flow paused: cycle escalated.")
         save_flow_state(cfg, flow)
+        return None
+
+    # Terminal: the spec is exhausted. Do nothing — not even revive panes for a
+    # finished project — until /flow reset clears it. The notice fired once, at
+    # the merged branch below, when halt was set.
+    if flow.get("halt"):
         return None
 
     ready_msg = ensure_agents_ready(cfg, flow)
@@ -1163,6 +1240,28 @@ def maybe_advance_flow(cfg: Config, state: CycleState, force: bool = False) -> s
         key = f"cycle-{state.cycle}:next_cycle"
         if flow.get("last_action_key") == key:
             return None
+        # Before asking Codex to invent the next cycle, check whether the spec
+        # still has work. Skipping this is what let a finished project spin up
+        # busywork cycles forever. The check is a no-op for specs without the
+        # SPEC-REQ convention, so only opted-in projects can auto-stop.
+        terminal = spec_completion_state(cfg)
+        if terminal is not None:
+            flow["halt"] = terminal
+            save_flow_state(cfg, flow)
+            if terminal["state"] == "spec_complete":
+                send_telegram(cfg, tagged(cfg, (
+                    "Flow halted: every SPEC-REQ requirement is implemented and no open decisions remain. "
+                    "Mode stays as-is; /flow reset to resume after adding specs, or /flow off to disable."
+                )))
+            else:
+                items = "\n".join(f"  • {it}" for it in terminal["items"][:12])
+                send_telegram(cfg, tagged(cfg, (
+                    "Flow halted: implementation is complete but SPEC-DECISION items are open. "
+                    "These are yours to decide — the flow will not guess them:\n"
+                    f"{items}\n"
+                    "Resolve them in the spec, then /flow reset to resume."
+                )))
+            return f"Flow halted: {terminal['state']}"
         if not codex_idle and not force:
             send_flow_notice(cfg, flow, f"{key}:wait", "Flow waiting: Codex is not idle for next-cycle preparation.")
             save_flow_state(cfg, flow)

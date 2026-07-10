@@ -308,6 +308,11 @@ def inject_artifacts(dest: Path, driver: str, log: StepLogger,
                    dest / ".review" / "_templates" / "plan-template.md", copied, skipped)
     copy_if_absent(TEMPLATE_DIR / "meta-cycle-template.md",
                    dest / ".review" / "_templates" / "meta-cycle-template.md", copied, skipped)
+    # Spec is authored per project, so seed it only as a starting point. Its
+    # SPEC-REQ / SPEC-DECISION markers are what flow reads to decide when the
+    # project is done; without them a project simply never auto-completes.
+    copy_if_absent(TEMPLATE_DIR / "spec-template.md",
+                   dest / "docs" / "spec" / "spec.md", copied, skipped)
 
     copy_if_absent(TEMPLATE_DIR / "CLAUDE.md", dest / ".claude" / "CLAUDE.md", copied, skipped)
     # Advisor runs as a dedicated subagent: effort can ONLY be set in the

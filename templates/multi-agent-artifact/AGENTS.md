@@ -368,6 +368,47 @@ PR merge 가능 조건:
 
 ---
 
+## Project Completion (Spec Exhaustion)
+
+Hermes flow(`full` 모드)는 매 머지 후 다음 사이클을 자동으로 준비한다. 언제 **멈춰야
+하는지**는 spec이 결정한다 — 모델 판단이 아니라 파일 상태로. flow가 `docs/spec/spec.md`
+(또는 projects.json의 `specPath`)를 파싱해 두 종류의 opt-in 마커만 집계한다.
+
+```
+<!-- SPEC-REQ -->        이 아래 체크박스는 구현 대상(기능 요구사항).
+- [ ] ...                구현되면 [x]로 체크.
+
+<!-- SPEC-DECISION -->   이 아래 체크박스는 사람이 내려야 할 결정.
+- [ ] ...                코드로 닫는 게 아니라 사용자가 확정해야 닫힌다.
+```
+
+마커의 스코프는 다음 마커 또는 다음 heading(`#`)까지다. 마커 밖 체크박스는 무시된다.
+마커가 하나도 없는 spec은 이 기능을 쓰지 않는 것으로 보고 flow는 종전대로 무한히 사이클을
+준비한다(기존 프로젝트 무영향).
+
+### 규칙 (Planner)
+
+1. **사이클 준비 시, 그 사이클이 닫는 `SPEC-REQ` 항목을 spec.md에서 `[x]`로 체크**한다.
+   체크하지 않으면 flow는 그 요구사항이 미구현이라고 보고 완료를 판정하지 못한다. spec의
+   체크박스가 유일한 진행 원장(ledger)이다 — codebase-map은 navigation catalog일 뿐 완료
+   판정의 분모가 아니다.
+2. **`SPEC-DECISION` 항목은 절대 임의로 결정하지 않는다.** 남은 구현이 미결정 항목에
+   막히면, 그 항목을 임의로 정해 구현하지 말고 사이클 준비를 중단한다. flow가 이를
+   `needs_decision`으로 감지해 정지하고 사용자에게 결정을 요청한다.
+
+### flow의 3-way 종료 판정
+
+| spec 상태 | flow 동작 |
+|-----------|-----------|
+| `SPEC-REQ`에 `[ ]` 남음 | 다음 사이클 준비 (계속) |
+| `SPEC-REQ` 전부 `[x]`, 열린 `SPEC-DECISION` 있음 | **정지** → 사용자 결정 요청 (`needs_decision`) |
+| `SPEC-REQ` 전부 `[x]`, 열린 결정 없음 | **정지** → 프로젝트 완료 알림 (`spec_complete`) |
+
+정지는 sticky하다. `/flow full`을 다시 눌러도 풀리지 않는다. 사용자가 spec을 갱신(결정
+확정 또는 새 요구사항 추가)한 뒤 **`/flow reset`**으로 명시적으로 재개한다.
+
+---
+
 ## Anti-patterns
 
 1. **plan.md mid-cycle 수정** — Issue-velocity cap 발동 후 escalation 경로에서만 허용.
