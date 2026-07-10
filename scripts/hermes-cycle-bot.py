@@ -962,6 +962,22 @@ def mark_flow_action(flow: dict[str, Any], key: str, waiting_for: str | None = N
     flow["last_action_at"] = utc_now()
 
 
+def log_flow_send(cfg: Config, agent: str, text: str, key: str, reply: str) -> None:
+    """Record a prompt the flow sent on its own.
+
+    Operator commands land in hermes-events.jsonl as telegram_command /
+    dashboard_command, but the flow's automatic sends left no trace — so the log
+    showed a cycle merging or advancing with no command behind it, which read as
+    the agents acting unprompted. Same file the dashboard renders, so these show
+    up there too."""
+    log_event(cfg, "flow_action", {
+        "agent": agent,
+        "key": key,
+        "text": text.strip().splitlines()[0][:80] if text.strip() else "",
+        "delivered": paste_delivered(reply),
+    })
+
+
 def paste_delivered(reply: str) -> bool:
     """False when the pane had to be (re)created, so the text never reached the CLI."""
     return "resend in a few seconds" not in reply
@@ -1011,6 +1027,7 @@ def flow_send_review(cfg: Config, flow: dict[str, Any], state: CycleState, promp
     reply = paste_to_pane(cfg, "codex", prompt, "Codex")
     flow["waiting_for_review_from"] = state.latest_review
     mark_flow_action(flow, key, "codex_review")
+    log_flow_send(cfg, "codex", prompt, key, reply)
     return reply
 
 
@@ -1028,6 +1045,7 @@ def flow_send_review_for_done(
     mark_done_processed(flow, done_rel)
     flow["waiting_for_review_from"] = state.latest_review
     mark_flow_action(flow, key, "codex_review")
+    log_flow_send(cfg, "codex", prompt, key, reply)
     return reply
 
 
@@ -1191,6 +1209,7 @@ def maybe_advance_flow(cfg: Config, state: CycleState, force: bool = False) -> s
             return err
         reply = paste_to_pane(cfg, "claude", prompt or "", "Claude")
         mark_flow_action(flow, key, "claude_implement")
+        log_flow_send(cfg, "claude", prompt or "", key, reply)
         save_flow_state(cfg, flow)
         send_telegram(cfg, f"Flow advanced: implement started\n{reply}")
         return reply
@@ -1213,6 +1232,7 @@ def maybe_advance_flow(cfg: Config, state: CycleState, force: bool = False) -> s
         )
         reply = paste_to_pane(cfg, "claude", prompt, "Claude")
         mark_flow_action(flow, key, "claude_fix")
+        log_flow_send(cfg, "claude", prompt, key, reply)
         save_flow_state(cfg, flow)
         send_telegram(cfg, f"Flow advanced: fix started\n{reply}")
         return reply
@@ -1232,6 +1252,7 @@ def maybe_advance_flow(cfg: Config, state: CycleState, force: bool = False) -> s
             return None
         reply = paste_to_pane(cfg, "codex", "머지하라", "Codex")
         mark_flow_action(flow, merge_key, "codex_merge")
+        log_flow_send(cfg, "codex", "머지하라", merge_key, reply)
         save_flow_state(cfg, flow)
         send_telegram(cfg, f"Flow advanced: merge requested\n{reply}")
         return reply
@@ -1248,6 +1269,7 @@ def maybe_advance_flow(cfg: Config, state: CycleState, force: bool = False) -> s
         if terminal is not None:
             flow["halt"] = terminal
             save_flow_state(cfg, flow)
+            log_event(cfg, "flow_halt", {"state": terminal["state"], "open_decisions": len(terminal["items"])})
             if terminal["state"] == "spec_complete":
                 send_telegram(cfg, tagged(cfg, (
                     "Flow halted: every SPEC-REQ requirement is implemented and no open decisions remain. "
@@ -1269,6 +1291,7 @@ def maybe_advance_flow(cfg: Config, state: CycleState, force: bool = False) -> s
         prompt = "남은 구현 스펙을 판단하고, 가장 적합한 다음 스펙 하나를 추천한 뒤 그 스펙으로 바로 사이클 준비하라."
         reply = paste_to_pane(cfg, "codex", prompt, "Codex")
         mark_flow_action(flow, key, "codex_next_cycle")
+        log_flow_send(cfg, "codex", prompt, key, reply)
         save_flow_state(cfg, flow)
         send_telegram(cfg, f"Flow advanced: next-cycle preparation requested\n{reply}")
         return reply
