@@ -277,6 +277,27 @@ def harvest_codex_session(root: Path, scan_limit: int = 200) -> str | None:
 # Drivers
 
 
+# Claude Code's spinner picks a random gerund each turn ("Choreographing…",
+# "Churned", "Perusing"), so no word list can track it. What is stable is the
+# shape: "…" followed by a running elapsed timer — "· Choreographing… (15m 27s)".
+# Do not anchor on the closing paren: the timer grows a suffix once the turn is
+# expensive ("(19m 4s · ↓ 55.8k tokens)") and a narrow pane wraps the line.
+# The finished line ("✻ Crunched for 17m 18s") has neither "…" nor parentheses.
+# Older builds print "esc to interrupt" instead of a timer.
+# Anchored at column 0, where the spinner's glyph sits ("✽ Choreographing… (21m
+# 26s)"). A running tool prints its own timer — "… (4m 51s · 2 lines)" — but
+# indented beneath the call, and it lingers in scrollback after the tool ends;
+# matching that would report busy for a finished turn.
+CLAUDE_BUSY_RE = re.compile(
+    r"(?m)^\S{0,2}\s*\w+…\s*\(\s*(?:\d+\s*h\s*)?(?:\d+\s*m\s*)?\d+(?:\.\d+)?\s*s\b"
+    r"|esc to interrupt",
+    re.IGNORECASE,
+)
+# Busy detection reads the live status area only. Scanning the whole capture
+# would let a previous turn's chrome, still sitting in scrollback, read as busy.
+CLAUDE_STATUS_LINES = 20
+
+
 class TmuxDriver:
     """Original behavior: agents are interactive CLIs inside tmux panes."""
 
@@ -424,13 +445,14 @@ class TmuxDriver:
             if any(marker in tail for marker in working):
                 return False
             return bool(re.search(r"(?m)^›\s", tail))
-        prompt_idx = tail.rfind("❯")
-        current = tail[prompt_idx:] if prompt_idx >= 0 else tail[-800:]
-        working = ["Perusing", "Running", "Working", "Waiting", "Esc to interrupt", "Bash("]
-        if any(marker in current for marker in working):
+        # Claude Code draws its spinner ABOVE the input box, so a window starting
+        # at the last "❯" sees only the always-present empty prompt and reads as
+        # idle no matter what the agent is doing. Read the status area instead.
+        status = "\n".join(tail.splitlines()[-CLAUDE_STATUS_LINES:])
+        if CLAUDE_BUSY_RE.search(status):
             return False
         idle_markers = ["accept edits on", "❯", "? for shortcuts"]
-        return any(marker in current for marker in idle_markers)
+        return any(marker in status for marker in idle_markers)
 
     def start(self, agent: str) -> str:
         session = self._session_name(agent)
