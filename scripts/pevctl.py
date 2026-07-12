@@ -119,6 +119,7 @@ GITIGNORE_FRAGMENT = [
     ".cairn/hermes.env",
     "__pycache__/",
     "*.pyc",
+    ".read-counter",
 ]
 
 

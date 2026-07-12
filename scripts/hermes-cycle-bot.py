@@ -59,6 +59,16 @@ BOT_COMMANDS = [
 
 FLOW_IDLE_GRACE_SECONDS = 45
 
+# Appended to merge / next-cycle prompts. Codex once found the root worktree
+# dirty and prepared the next cycle in a /tmp git worktree — Hermes only scans
+# <root>/.review, so the flow stalled on the previous cycle forever.
+WORKTREE_RULE = (
+    "모든 작업은 반드시 프로젝트 루트 워크트리에서 하라. 별도 git worktree나 임시 디렉토리를 만들지 마라. "
+    "루트가 dirty면 잔여 변경을 `git stash push -u -m 'pre-cycle residue'`로 보존한 뒤 진행하고, "
+    "마지막 응답에 stash했다고 명시하라. 다음 사이클을 준비할 때는 새 브랜치를 루트에서 checkout까지 "
+    "완료하라 — .review/cycle-N이 프로젝트 루트에 보여야 Hermes가 진행한다."
+)
+
 
 @dataclass
 class Config:
@@ -1250,9 +1260,10 @@ def maybe_advance_flow(cfg: Config, state: CycleState, force: bool = False) -> s
             send_flow_notice(cfg, flow, f"{merge_key}:wait", "Flow waiting: Codex is not idle for merge.")
             save_flow_state(cfg, flow)
             return None
-        reply = paste_to_pane(cfg, "codex", "머지하라", "Codex")
+        merge_prompt = "머지하라. " + WORKTREE_RULE
+        reply = paste_to_pane(cfg, "codex", merge_prompt, "Codex")
         mark_flow_action(flow, merge_key, "codex_merge")
-        log_flow_send(cfg, "codex", "머지하라", merge_key, reply)
+        log_flow_send(cfg, "codex", merge_prompt, merge_key, reply)
         save_flow_state(cfg, flow)
         send_telegram(cfg, f"Flow advanced: merge requested\n{reply}")
         return reply
@@ -1288,7 +1299,8 @@ def maybe_advance_flow(cfg: Config, state: CycleState, force: bool = False) -> s
             send_flow_notice(cfg, flow, f"{key}:wait", "Flow waiting: Codex is not idle for next-cycle preparation.")
             save_flow_state(cfg, flow)
             return None
-        prompt = "남은 구현 스펙을 판단하고, 가장 적합한 다음 스펙 하나를 추천한 뒤 그 스펙으로 바로 사이클 준비하라."
+        prompt = ("남은 구현 스펙을 판단하고, 가장 적합한 다음 스펙 하나를 추천한 뒤 그 스펙으로 바로 사이클 준비하라. "
+                  + WORKTREE_RULE)
         reply = paste_to_pane(cfg, "codex", prompt, "Codex")
         mark_flow_action(flow, key, "codex_next_cycle")
         log_flow_send(cfg, "codex", prompt, key, reply)
