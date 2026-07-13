@@ -453,6 +453,161 @@ def list_context(project: Project) -> dict[str, Any]:
     return json.loads(result.stdout.strip().splitlines()[-1])
 
 
+# ---------------------------------------------------------------------------
+# Spec progress — deterministic cross-reference of the spec's FR table against
+# cycle plans. No LLM: the spec defines the universe of FR ids, each cycle's
+# plan.md names the FR it implements (a `Spec:` line wins; otherwise the most
+# frequently mentioned id), and the cycle's own artifacts say how far it got.
+
+FR_ID_RE = re.compile(r"\bFR-[A-Z0-9]+-\d+\b")
+SPEC_FR_ROW_RE = re.compile(r"^\s*\|\s*(FR-[A-Z0-9]+-\d+)\s*\|")
+MODULE_HEADING_RE = re.compile(r"^##\s+(.+?)\s*$")
+PLAN_SPEC_LINE_RE = re.compile(r"^Spec:\s*(.+)$", re.M)
+SPEC_CHECKBOX_RE = re.compile(r"^\s*[-*]\s*\[(?P<mark>[ xX])\]")
+
+
+def find_spec_path(project: Project) -> Path | None:
+    rel = (project.raw or {}).get("specPath")
+    if rel:
+        path = project.root / str(rel)
+        return path if path.exists() else None
+    default = project.root / "docs" / "spec" / "spec.md"
+    if default.exists():
+        return default
+    spec_dir = project.root / "docs" / "spec"
+    if spec_dir.is_dir():
+        for path in sorted(spec_dir.glob("*.md")):
+            return path
+    return None
+
+
+def plan_primary_frs(plan_text: str) -> list[str]:
+    """FR ids a cycle plan claims to implement. A dedicated `Spec:` line is
+    authoritative; otherwise pick the most-mentioned id (plans cite neighbours
+    once as context but repeat their own target throughout)."""
+    match = PLAN_SPEC_LINE_RE.search(plan_text)
+    if match:
+        ids = FR_ID_RE.findall(match.group(1))
+        if ids:
+            return sorted(set(ids))
+    counts: dict[str, int] = {}
+    first_seen: dict[str, int] = {}
+    for i, m in enumerate(FR_ID_RE.finditer(plan_text)):
+        fid = m.group(0)
+        counts[fid] = counts.get(fid, 0) + 1
+        first_seen.setdefault(fid, i)
+    if not counts:
+        return []
+    best = max(counts.values())
+    top = sorted((f for f, c in counts.items() if c == best), key=lambda f: first_seen[f])
+    return [top[0]]
+
+
+def cycle_outcome(cycle_dir: Path) -> str:
+    """done | in_progress | stalled, from the cycle's own artifacts."""
+    status = read_text(cycle_dir / "status.txt").strip()
+    if status in ("ready_to_merge", "merged"):
+        return "done"
+    review_path = latest_review(cycle_dir)
+    if review_path and parse_verdict(read_text(review_path)) in ("READY_TO_MERGE", "PASS"):
+        return "done"
+    if status == "in_progress":
+        return "in_progress"
+    return "stalled"
+
+
+def spec_progress(project: Project) -> dict[str, Any]:
+    spec_path = find_spec_path(project)
+    if spec_path is None:
+        raise FileNotFoundError("no spec found (docs/spec/*.md, or set specPath in projects.json)")
+    lines = read_text(spec_path).splitlines()
+
+    module = "(intro)"
+    fr_module: dict[str, str] = {}
+    fr_order: list[str] = []
+    module_order: list[str] = []
+    decisions_open = 0
+    decisions_resolved = 0
+    for line in lines:
+        heading = MODULE_HEADING_RE.match(line)
+        if heading:
+            module = heading.group(1)
+            continue
+        row = SPEC_FR_ROW_RE.match(line)
+        if row:
+            fid = row.group(1)
+            if fid not in fr_module:
+                fr_module[fid] = module
+                fr_order.append(fid)
+                if module not in module_order:
+                    module_order.append(module)
+            continue
+        box = SPEC_CHECKBOX_RE.match(line)
+        if box:
+            if box.group("mark") == " ":
+                decisions_open += 1
+            else:
+                decisions_resolved += 1
+
+    fr_state: dict[str, dict[str, Any]] = {
+        fid: {"status": "todo", "cycles": []} for fid in fr_order
+    }
+    extras: dict[str, list[int]] = {}
+    review_dir = project.root / ".review"
+    if review_dir.is_dir():
+        cycles = sorted(
+            (int(m.group(1)), p) for p in review_dir.iterdir()
+            if (m := re.fullmatch(r"cycle-(\d+)", p.name)) and p.is_dir()
+        )
+        for n, cycle_dir in cycles:
+            plan_text = read_text(cycle_dir / "plan.md")
+            if not plan_text:
+                continue
+            outcome = cycle_outcome(cycle_dir)
+            for fid in plan_primary_frs(plan_text):
+                state = fr_state.get(fid)
+                if state is None:
+                    extras.setdefault(fid, []).append(n)
+                    continue
+                state["cycles"].append({"cycle": n, "outcome": outcome})
+                if outcome == "done":
+                    state["status"] = "done"
+                elif outcome == "in_progress" and state["status"] != "done":
+                    state["status"] = "in_progress"
+                elif outcome == "stalled" and state["status"] == "todo":
+                    state["status"] = "stalled"
+
+    def bucket(ids: list[str]) -> dict[str, Any]:
+        done = sum(1 for f in ids if fr_state[f]["status"] == "done")
+        in_prog = sum(1 for f in ids if fr_state[f]["status"] == "in_progress")
+        stalled = sum(1 for f in ids if fr_state[f]["status"] == "stalled")
+        total = len(ids)
+        return {
+            "total": total, "done": done, "inProgress": in_prog, "stalled": stalled,
+            "todo": total - done - in_prog - stalled,
+            "percent": round(100 * done / total) if total else 0,
+        }
+
+    modules = []
+    for name in module_order:
+        ids = [f for f in fr_order if fr_module[f] == name]
+        modules.append({
+            "name": name,
+            **bucket(ids),
+            "frs": [{"id": f, "status": fr_state[f]["status"],
+                     "cycles": [c["cycle"] for c in fr_state[f]["cycles"]]} for f in ids],
+        })
+
+    return {
+        "spec": str(spec_path.relative_to(project.root)),
+        "totals": bucket(fr_order),
+        "modules": modules,
+        "decisions": {"open": decisions_open, "resolved": decisions_resolved},
+        "extraFrs": [{"id": f, "cycles": ns} for f, ns in sorted(extras.items())],
+        "inProgressFrs": [f for f in fr_order if fr_state[f]["status"] == "in_progress"],
+    }
+
+
 def start_init_job(body: dict[str, Any]) -> dict[str, Any]:
     if PEVCTL_PATH is None:
         raise FileNotFoundError("pevctl.py not found next to dashboard")
@@ -715,6 +870,19 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 self.send_json({"ok": True, **list_context(project)})
             except (OSError, ValueError, json.JSONDecodeError) as err:
+                self.send_error_json(str(err), 500)
+            return
+        match = re.fullmatch(r"/api/projects/([^/]+)/spec-progress", path)
+        if match:
+            project = project_by_id(unquote(match.group(1)))
+            if not project:
+                self.send_error_json("Unknown project", 404)
+                return
+            try:
+                self.send_json({"ok": True, "progress": spec_progress(project), "updatedAt": utc_now()})
+            except FileNotFoundError as err:
+                self.send_error_json(str(err), 404)
+            except (OSError, ValueError) as err:
                 self.send_error_json(str(err), 500)
             return
         match = re.fullmatch(r"/api/projects/([^/]+)/tail", path)

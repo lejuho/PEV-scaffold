@@ -15,6 +15,9 @@
 Branch: <feature/...>
 Cycle: <N>
 Created: <YYYY-MM-DD>
+Spec: <FR-XXX-NN | none>
+<!-- 이번 cycle이 구현하는 스펙 FR ID (쉼표로 여러 개 가능, 스펙 무관 작업은 none).
+     대시보드 구현 현황(spec-progress)이 이 줄로 사이클↔스펙을 교차 집계한다. -->
 Skills: <skill1, skill2 | none>
 <!-- 이번 cycle이 로드해야 할 도메인 skill. 코드 변경이 있으면 필수.
      해당 도메인 skill이 없으면 "none". advisor는 자동이라 적지 않아도 됨.

@@ -155,6 +155,18 @@ const copy = {
     metaBanner: "Meta-cycle suggested — retro PEV against itself.",
     metaCopy: "📋 Copy meta-cycle prompt",
     metaCopied: "Meta-cycle prompt copied to clipboard.",
+    specProgress: "📋 Spec progress",
+    loadSpec: "Cross-reference spec vs cycles",
+    specLoading: "Parsing spec…",
+    refreshSpec: "Refresh spec progress",
+    specImplemented: "implemented",
+    specInProgress: "in progress",
+    specStalled: "stalled",
+    specTodo: "not started",
+    specDecisions: "open decisions",
+    specExtra: "cycles outside spec",
+    specShowTodo: "Show remaining FRs",
+    specNone: "No spec found (docs/spec/ or specPath).",
     newProject: "＋ New",
     ctaEscalated: "⚠ Needs decision",
     ctaEscalatedDesc: "escalated — open Claude tail",
@@ -321,6 +333,18 @@ const copy = {
     metaBanner: "메타 사이클 제안 — PEV 자체를 회고할 시점입니다.",
     metaCopy: "📋 메타 사이클 프롬프트 복사",
     metaCopied: "메타 사이클 프롬프트를 클립보드에 복사했습니다.",
+    specProgress: "📋 구현 현황",
+    loadSpec: "스펙 ↔ 사이클 교차 집계",
+    specLoading: "스펙 파싱 중…",
+    refreshSpec: "구현 현황 새로고침",
+    specImplemented: "구현됨",
+    specInProgress: "진행 중",
+    specStalled: "중단됨",
+    specTodo: "미착수",
+    specDecisions: "미결정",
+    specExtra: "스펙 외 사이클",
+    specShowTodo: "남은 FR 보기",
+    specNone: "스펙 파일이 없습니다 (docs/spec/ 또는 specPath).",
     newProject: "＋ 새 프로젝트",
     ctaEscalated: "⚠ 판단 필요",
     ctaEscalatedDesc: "escalated — Claude 화면 확인",
@@ -809,6 +833,81 @@ function metaCyclePrompt(project, m) {
   ].join("\n");
 }
 
+/* ── Spec progress (스펙 ↔ 사이클 교차 집계) ── */
+const specCache = {};
+
+function specBar(percent, cls = "") {
+  return `<span class="spec-bar ${cls}"><span class="spec-fill" style="width:${percent}%"></span></span>`;
+}
+
+function renderSpecContent(project) {
+  const entry = specCache[project.id];
+  if (!entry) {
+    return `<button type="button" class="action-btn" data-action="spec" data-project="${project.id}">
+      <span class="btn-title">${t("specProgress")}</span>
+      <span class="btn-desc">${t("loadSpec")}</span>
+    </button>`;
+  }
+  if (entry.loading) {
+    return `<div class="metrics-summary">${t("specLoading")}</div>`;
+  }
+  if (entry.error) {
+    return `<div class="metrics-summary">${esc(entry.error)}</div>
+      <button type="button" class="action-btn compact" data-action="spec" data-project="${project.id}">
+        <span class="btn-title">${t("refreshSpec")}</span>
+      </button>`;
+  }
+  const s = entry.data;
+  const tt = s.totals;
+  const chips = [
+    `${tt.done}/${tt.total} ${t("specImplemented")}`,
+    tt.inProgress ? `${t("specInProgress")} ${tt.inProgress}` : "",
+    tt.stalled ? `${t("specStalled")} ${tt.stalled}` : "",
+    `${t("specTodo")} ${tt.todo}`,
+    `${t("specDecisions")} ${s.decisions.open}`,
+    s.extraFrs.length ? `${t("specExtra")} ${s.extraFrs.length}` : "",
+  ].filter(Boolean).join(" · ");
+  const moduleRows = s.modules.filter((m) => m.total > 0).map((m) => {
+    const remaining = m.frs.filter((f) => f.status !== "done");
+    const remainList = remaining.length
+      ? `<details class="spec-todo"><summary>${t("specShowTodo")} (${remaining.length})</summary>
+           <div class="spec-fr-list">${remaining.map((f) =>
+             `<span class="spec-fr ${f.status}">${esc(f.id)}</span>`).join(" ")}</div>
+         </details>`
+      : "";
+    return `
+      <div class="spec-row">
+        <span class="spec-name" title="${esc(m.name)}">${esc(m.name)}</span>
+        ${specBar(m.percent)}
+        <span class="spec-num">${m.percent}% <span class="muted-line">(${m.done}/${m.total})</span></span>
+      </div>${remainList}`;
+  }).join("");
+  return `
+    <div class="metrics-subtitle">${t("specProgress")} · <code>${esc(s.spec)}</code></div>
+    <div class="spec-overall">
+      <span class="spec-percent">${tt.percent}%</span>
+      ${specBar(tt.percent, "big")}
+    </div>
+    <div class="muted-line spec-chips">${esc(chips)}</div>
+    ${s.inProgressFrs.length ? `<div class="muted-line">⏳ ${s.inProgressFrs.map(esc).join(", ")}</div>` : ""}
+    <div class="spec-modules">${moduleRows}</div>
+    <button type="button" class="action-btn compact" data-action="spec" data-project="${project.id}">
+      <span class="btn-title">${t("refreshSpec")}</span>
+    </button>`;
+}
+
+async function loadSpecProgress(projectId) {
+  specCache[projectId] = { loading: true };
+  render();
+  try {
+    const body = await api(`/api/projects/${encodeURIComponent(projectId)}/spec-progress`);
+    specCache[projectId] = { loading: false, data: body.progress };
+  } catch (err) {
+    specCache[projectId] = { loading: false, error: err.message };
+  }
+  render();
+}
+
 function renderMetricsContent(project) {
   const entry = metricsCache[project.id];
   if (!entry) {
@@ -873,6 +972,7 @@ function render() {
         ${agentStatusRow(p)}
         <div class="flow">${flowSteps}</div>
         <div class="metrics-block" data-metrics-block="${p.id}">${renderMetricsContent(p)}</div>
+        <div class="metrics-block" data-spec-block="${p.id}">${renderSpecContent(p)}</div>
         <div class="controls">
           ${section(p, t("flowMode"), t("flowModeDesc"), `
             ${commandButton(p, t("status"), "/flow status", t("statusDesc"))}
@@ -1074,6 +1174,10 @@ async function handleAction(button) {
   const project = button.dataset.project;
   if (button.dataset.action === "metrics") {
     await loadMetrics(project, metricsCache[project] && !metricsCache[project].loading);
+    return;
+  }
+  if (button.dataset.action === "spec") {
+    await loadSpecProgress(project);
     return;
   }
   if (button.dataset.action === "meta-copy") {

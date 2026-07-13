@@ -426,6 +426,41 @@ pre {
   .section-caret { transition: none; }
 }
 
+/* --- spec progress --- */
+.spec-overall { display: flex; align-items: center; gap: 10px; margin: 6px 0 2px; }
+.spec-percent { font-size: 1.5rem; font-weight: 800; min-width: 3.2ch; }
+.spec-bar {
+  display: inline-block;
+  flex: 1;
+  height: 8px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--overlay-1);
+  overflow: hidden;
+  vertical-align: middle;
+}
+.spec-bar.big { height: 12px; }
+.spec-fill { display: block; height: 100%; background: var(--good); }
+.spec-chips { margin: 4px 0 8px; }
+.spec-modules { display: grid; gap: 5px; margin-top: 6px; }
+.spec-row { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(60px, 1fr) auto; gap: 8px; align-items: center; }
+.spec-name { font-size: 0.78rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.spec-num { font-size: 0.78rem; white-space: nowrap; }
+.spec-todo { margin: 0 0 4px; }
+.spec-todo summary { font-size: 0.72rem; color: var(--muted); cursor: pointer; }
+.spec-fr-list { margin-top: 4px; line-height: 1.9; }
+.spec-fr {
+  display: inline-block;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-size: 0.7rem;
+  font-family: ui-monospace, monospace;
+  color: var(--muted);
+}
+.spec-fr.in_progress { color: var(--warn); border-color: var(--warn); }
+.spec-fr.stalled { color: var(--bad); border-color: var(--bad); }
+
 /* --- metrics --- */
 .metrics-block { margin-top: 14px; }
 .meta-banner {

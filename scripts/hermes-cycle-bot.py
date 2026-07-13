@@ -1300,6 +1300,7 @@ def maybe_advance_flow(cfg: Config, state: CycleState, force: bool = False) -> s
             save_flow_state(cfg, flow)
             return None
         prompt = ("남은 구현 스펙을 판단하고, 가장 적합한 다음 스펙 하나를 추천한 뒤 그 스펙으로 바로 사이클 준비하라. "
+                  "plan.md 머리에 `Spec: FR-XXX-NN` 줄로 이번 사이클이 구현하는 스펙 ID를 명시하라. "
                   + WORKTREE_RULE)
         reply = paste_to_pane(cfg, "codex", prompt, "Codex")
         mark_flow_action(flow, key, "codex_next_cycle")
