@@ -17,6 +17,8 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 import metrics
+import usage as subscription_usage
+from claude_auth import claude_auth
 
 APP_ROOT = Path(__file__).resolve().parent
 for _candidate in (APP_ROOT.parent / "scripts", Path("/home/pi/PEV-scaffold/scripts")):
@@ -333,6 +335,33 @@ def command_allowed(command: str) -> bool:
     return len(parts) == 1
 
 
+def classify_intervention(command: str) -> str:
+    parts = command.strip().lower().split()
+    base = parts[0] if parts else ""
+    if base in {"/status", "/cycle", "/tail", "/help", "/start", "/menu", "/remaining"}:
+        return "observation"
+    if base == "/say":
+        return "guidance"
+    if base in {"/fix", "/recheck"}:
+        return "retry"
+    if base == "/merge":
+        return "manual_merge"
+    if base in {"/enter", "/hold", "/resume"}:
+        return "override"
+    if base in {"/implement", "/review", "/prepare_next"}:
+        return "manual_progress"
+    if base == "/flow":
+        mode = parts[1] if len(parts) > 1 else "status"
+        if mode in {"safe", "on", "full"}:
+            return "flow_start"
+        if mode in {"status", "state"}:
+            return "observation"
+        if mode == "reset":
+            return "override"
+        return "flow_control"
+    return "other"
+
+
 def run_project_command(project: Project, command: str) -> dict[str, Any]:
     if not command_allowed(command):
         raise ValueError("Command not allowed by PEV dashboard allowlist")
@@ -346,8 +375,21 @@ def run_project_command(project: Project, command: str) -> dict[str, Any]:
         env.setdefault("HERMES_CLAUDE_PANE", project.claude_pane)
     if project.codex_pane:
         env.setdefault("HERMES_CODEX_PANE", project.codex_pane)
+    started = time.monotonic()
     result = run_cmd([str(script), "--command", command], project.root, timeout=30, env=env)
-    append_event(project, "dashboard_command", {"command": command, "returncode": result.returncode})
+    duration_ms = int((time.monotonic() - started) * 1000)
+    append_event(
+        project,
+        "dashboard_command",
+        {
+            "cycle": latest_cycle(project.root),
+            "origin": "dashboard",
+            "intervention_type": classify_intervention(command),
+            "duration_ms": duration_ms,
+            "command": command,
+            "returncode": result.returncode,
+        },
+    )
     return {"returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
 
 
@@ -363,9 +405,20 @@ def create_done(project: Project, payload: dict[str, Any]) -> dict[str, Any]:
     summary = str(payload.get("summary") or "Manual PEV dashboard done signal.")
     checks = payload.get("checks")
     if isinstance(checks, str):
-        checks = [line.strip() for line in checks.splitlines() if line.strip()]
+        checks = [
+            {"command": line.strip(), "durationSec": None, "exitCode": None}
+            for line in checks.splitlines()
+            if line.strip()
+        ]
     if not isinstance(checks, list):
         checks = []
+    checks = [
+        {"command": item.strip(), "durationSec": None, "exitCode": None}
+        if isinstance(item, str)
+        else item
+        for item in checks
+        if isinstance(item, (str, dict))
+    ]
     done = {
         "cycle": state["cycle"],
         "pass": expected["pass"],
@@ -381,7 +434,14 @@ def create_done(project: Project, payload: dict[str, Any]) -> dict[str, Any]:
     append_event(
         project,
         "dashboard_done",
-        {"cycle": done["cycle"], "pass": done["pass"], "kind": done["kind"], "path": rel},
+        {
+            "cycle": done["cycle"],
+            "origin": "dashboard",
+            "intervention_type": "override",
+            "pass": done["pass"],
+            "kind": done["kind"],
+            "path": rel,
+        },
     )
     return {"path": rel, "done": done}
 
@@ -744,7 +804,12 @@ def project_metrics(project: Project, meta: dict[str, Any], *, force: bool = Fal
         except (OSError, json.JSONDecodeError):
             cached = None
             age = None
-        if cached is not None and age is not None and age < METRICS_CACHE_SECONDS:
+        if (
+            isinstance(cached, dict)
+            and cached.get("schemaVersion") == 3
+            and age is not None
+            and age < METRICS_CACHE_SECONDS
+        ):
             return cached
     result = metrics.compute_metrics(project.root, tags=tags)
     try:
@@ -802,6 +867,13 @@ class Handler(BaseHTTPRequestHandler):
             state = load_state()
             items = [scan_project(project, state["projects"].get(project.id, {})) for project in load_projects()]
             self.send_json({"ok": True, "projects": items, "updatedAt": utc_now()})
+            return
+        if path == "/api/usage":
+            force = parse_qs(parsed.query).get("force", ["0"])[0] in ("1", "true")
+            self.send_json({"ok": True, "usage": subscription_usage.collect_usage(force=force), "updatedAt": utc_now()})
+            return
+        if path == "/api/auth/claude/status":
+            self.send_json({"ok": True, "auth": claude_auth.status(), "updatedAt": utc_now()})
             return
         match = re.fullmatch(r"/api/projects/([^/]+)", path)
         if match:
@@ -906,6 +978,19 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
+        if path == "/api/auth/claude/start":
+            try:
+                self.send_json({"ok": True, "auth": claude_auth.start()})
+            except (OSError, RuntimeError) as err:
+                self.send_error_json(str(err), 500)
+            return
+        if path == "/api/auth/claude/input":
+            try:
+                body = self.read_body()
+                self.send_json({"ok": True, "auth": claude_auth.submit_code(str(body.get("code") or ""))})
+            except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as err:
+                self.send_error_json(str(err), 400)
+            return
         if path == "/api/projects/init":
             try:
                 result = start_init_job(self.read_body())
@@ -975,7 +1060,17 @@ class Handler(BaseHTTPRequestHandler):
                     result = getattr(runner, op)(agent)
                 else:
                     raise ValueError("Unknown agent operation")
-                append_event(project, "dashboard_agent", {"agent": agent, "op": op})
+                append_event(
+                    project,
+                    "dashboard_agent",
+                    {
+                        "cycle": latest_cycle(project.root),
+                        "origin": "dashboard",
+                        "intervention_type": "override",
+                        "agent": agent,
+                        "op": op,
+                    },
+                )
                 self.send_json({"ok": True, "result": result})
                 return
             if action == "command":

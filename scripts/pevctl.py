@@ -54,6 +54,10 @@ CONTEXT_CATEGORIES = {
 }
 CONTEXT_MARKER = "<!-- PEV_CONTEXT_POINTER -->"
 CONTEXT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+SPEC_TASK_RE = re.compile(
+    r"^\s*[-*]\s+(?:\[([ xX~])\]\s+)?(?:(T\d+[A-Za-z0-9_-]*)\s+)?(.+?)\s*$"
+)
+SPEC_REQUIREMENT_RE = re.compile(r"\b(?:FR|SPEC)-[A-Z0-9]+(?:-[A-Z0-9]+)+\b", re.I)
 
 # force-advisor-check.sh is deliberately absent: the Step Advisor is the
 # Executor's obligation (AGENTS.md role table), and Codex runs as Planner and
@@ -307,6 +311,8 @@ def inject_artifacts(dest: Path, driver: str, log: StepLogger,
     copy_if_absent(TEMPLATE_DIR / "CONTRACT_MARKERS.md", dest / "CONTRACT_MARKERS.md", copied, skipped)
     copy_if_absent(TEMPLATE_DIR / "plan-template.md",
                    dest / ".review" / "_templates" / "plan-template.md", copied, skipped)
+    copy_if_absent(TEMPLATE_DIR / "selection-template.json",
+                   dest / ".review" / "_templates" / "selection-template.json", copied, skipped)
     copy_if_absent(TEMPLATE_DIR / "meta-cycle-template.md",
                    dest / ".review" / "_templates" / "meta-cycle-template.md", copied, skipped)
     # Spec is authored per project, so seed it only as a starting point. Its
@@ -679,6 +685,166 @@ def cmd_context(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# Spec Kit → PEV planning bridge
+
+
+def next_cycle_number(root: Path) -> int:
+    review = root / ".review"
+    cycles = []
+    if review.is_dir():
+        for path in review.iterdir():
+            match = re.fullmatch(r"cycle-(\d+)", path.name)
+            if path.is_dir() and match:
+                cycles.append(int(match.group(1)))
+    return max(cycles, default=0) + 1
+
+
+def resolve_spec_dir(root: Path, value: str) -> Path:
+    supplied = Path(value).expanduser()
+    candidates = [supplied if supplied.is_absolute() else root / supplied, root / "specs" / value]
+    spec_dir = next((path.resolve() for path in candidates if path.is_dir()), None)
+    if spec_dir is None:
+        raise SystemExit(f"Spec Kit directory not found: {value!r} (expected {root / 'specs' / value})")
+    try:
+        spec_dir.relative_to(root)
+    except ValueError as exc:
+        raise SystemExit(f"spec directory must be inside project root: {spec_dir}") from exc
+    return spec_dir
+
+
+def parse_spec_tasks(text: str) -> list[dict[str, Any]]:
+    tasks: list[dict[str, Any]] = []
+    generated = 0
+    for line_no, line in enumerate(text.splitlines(), 1):
+        match = SPEC_TASK_RE.match(line)
+        if not match:
+            continue
+        marker, task_id, title = match.groups()
+        # Ignore prose bullets. Spec Kit task rows normally have a checkbox or
+        # a T-number; requiring either keeps headings/notes out of candidates.
+        if marker is None and task_id is None:
+            continue
+        generated += 1
+        status = "completed" if marker and marker.lower() == "x" else "assigned" if marker == "~" else "open"
+        tasks.append(
+            {
+                "id": task_id or f"TASK-{generated:03d}",
+                "title": title.strip(),
+                "sourceLine": line_no,
+                "sourceStatus": status,
+            }
+        )
+    return tasks
+
+
+def cmd_import_spec(args: argparse.Namespace) -> int:
+    root = Path(args.root).expanduser().resolve()
+    if not root.is_dir():
+        raise SystemExit(f"project root not found: {root}")
+    spec_dir = resolve_spec_dir(root, args.spec)
+    source_files = {name: spec_dir / name for name in ("spec.md", "plan.md", "tasks.md")}
+    if not source_files["spec.md"].is_file() or not source_files["tasks.md"].is_file():
+        raise SystemExit(f"Spec Kit artifacts require spec.md and tasks.md under {spec_dir}")
+    cycle = args.cycle or next_cycle_number(root)
+    cycle_dir = root / ".review" / f"cycle-{cycle}"
+    manifest_path = cycle_dir / "spec-import.json"
+    request_path = cycle_dir / "planner-request.md"
+    if cycle_dir.exists() and any(cycle_dir.iterdir()):
+        raise SystemExit(f"cycle directory is not empty; refusing to overwrite: {cycle_dir}")
+
+    task_text = source_files["tasks.md"].read_text(encoding="utf-8", errors="replace")
+    tasks = parse_spec_tasks(task_text)
+    open_tasks = [task for task in tasks if task["sourceStatus"] != "completed"]
+    spec_text = source_files["spec.md"].read_text(encoding="utf-8", errors="replace")
+    requirement_ids = list(dict.fromkeys(value.upper() for value in SPEC_REQUIREMENT_RE.findall(spec_text)))
+    relative_sources = {
+        key: str(path.relative_to(root)) for key, path in source_files.items() if path.is_file()
+    }
+    spec_key = spec_dir.name
+    created_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    manifest = {
+        "schemaVersion": 1,
+        "cycle": cycle,
+        "spec": spec_key,
+        "createdAt": created_at,
+        "status": "awaiting_planner",
+        "sources": relative_sources,
+        "requirementIds": requirement_ids,
+        "openTasks": open_tasks,
+        "completedTaskIds": [task["id"] for task in tasks if task["sourceStatus"] == "completed"],
+    }
+    cycle_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    task_lines = "\n".join(f"- {task['id']}: {task['title']}" for task in open_tasks) or "- (no open tasks parsed)"
+    request = f"""# Spec Kit → PEV Planner Request
+
+Cycle: {cycle}
+Source manifest: `.review/cycle-{cycle}/spec-import.json`
+
+Read the source artifacts listed in the manifest. Do not implement code and do
+not run `/speckit.implement`. Compare 2–5 cohesive remaining slices, then write:
+
+1. `.review/cycle-{cycle}/selection.json` from the scaffold's latest PEV selection v2 template
+2. `.review/cycle-{cycle}/plan.md` from the PEV plan template
+
+Preserve requirement IDs in `Spec:` and list every selected task in the chosen
+candidate's `includedTasks`. Score each candidate using userValue,
+dependencyUnlock, codeAffinity, independentVerification, changeRisk, testCost,
+repetitionPenalty and fragmentationPenalty. Predict repeated test time and fixed
+verification cost. If one task is selected while the same FR has compatible
+remaining work, fragmentation.splitRationale must compare risk reduction against
+the repeated verification cost. Prefer a slice independently implementable and verifiable
+within one cycle; include exact files, checks, acceptance criteria, edge cases,
+assumptions and review guidance. Historical selections are immutable.
+
+## Parsed open tasks
+
+{task_lines}
+"""
+    request_path.write_text(request, encoding="utf-8")
+
+    index_path = root / ".review" / "spec-index.json"
+    index = read_json_file(index_path)
+    if not isinstance(index, dict):
+        index = {"schemaVersion": 1, "specs": {}}
+    specs = index.setdefault("specs", {})
+    entry = specs.setdefault(spec_key, {"path": str(spec_dir.relative_to(root)), "tasks": {}, "imports": []})
+    entry["requirements"] = requirement_ids
+    entry.setdefault("imports", []).append({"cycle": cycle, "createdAt": created_at, "status": "awaiting_planner"})
+    indexed_tasks = entry.setdefault("tasks", {})
+    for task in tasks:
+        previous = indexed_tasks.get(task["id"], {})
+        indexed_tasks[task["id"]] = {
+            **previous,
+            "title": task["title"],
+            "sourceLine": task["sourceLine"],
+            "sourceStatus": task["sourceStatus"],
+        }
+    index_path.write_text(json.dumps(index, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    result = {
+        "ok": True,
+        "cycle": cycle,
+        "spec": spec_key,
+        "manifest": str(manifest_path.relative_to(root)),
+        "plannerRequest": str(request_path.relative_to(root)),
+        "openTasks": len(open_tasks),
+        "requirements": requirement_ids,
+        "next": f"/say codex Read .review/cycle-{cycle}/planner-request.md and prepare the cycle artifacts.",
+    }
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def read_json_file(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 
 # ---------------------------------------------------------------------------
 # teardown
@@ -850,6 +1016,11 @@ def main() -> int:
     c.add_argument("--no-commit", action="store_true")
     c.add_argument("--push", action="store_true")
 
+    i = sub.add_parser("import-spec", help="prepare a PEV planner handoff from Spec Kit artifacts")
+    i.add_argument("--root", required=True, help="project root directory")
+    i.add_argument("--spec", required=True, help="spec id under specs/ or a project-relative spec directory")
+    i.add_argument("--cycle", type=int, help="cycle number (default: next available)")
+
     args = parser.parse_args()
     try:
         if args.cmd == "init":
@@ -860,6 +1031,10 @@ def main() -> int:
             if args.action == "add" and not args.category:
                 raise SystemExit("--category is required for 'context add'")
             return cmd_context(args)
+        if args.cmd == "import-spec":
+            if args.cycle is not None and args.cycle < 1:
+                raise SystemExit("--cycle must be >= 1")
+            return cmd_import_spec(args)
     except subprocess.CalledProcessError as exc:
         detail = (exc.stderr or exc.stdout or "").strip()[-500:]
         print(json.dumps({"step": "fatal", "ok": False,

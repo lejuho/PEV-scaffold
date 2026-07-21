@@ -1,4 +1,5 @@
 const projectsEl = document.querySelector("#projects");
+const subscriptionUsageEl = document.querySelector("#subscriptionUsage");
 const consoleEl = document.querySelector("#console");
 const showArchivedEl = document.querySelector("#showArchived");
 const showArchivedLabelEl = document.querySelector("#showArchivedLabel");
@@ -24,10 +25,16 @@ const ctxListEl = document.querySelector("#ctxList");
 let contextProjectId = "";
 
 let projects = [];
+let subscriptionUsage = null;
+let usageRequest = null;
+let claudeAuth = null;
+let claudeAuthPoll = null;
 const compactMedia = window.matchMedia("(max-width: 620px)");
 const expandedSections = new Set();
 const metricsCache = {};
 const metricsExpanded = new Set();
+const visibleMetrics = new Set();
+const visibleSpecProgress = new Set();
 let quickProjectId = "";
 let language = localStorage.getItem("pevLanguage") || "en";
 
@@ -53,6 +60,7 @@ const copy = {
     idle: "idle",
     busy: "busy",
     unknown: "unknown",
+    limited: "usage limited",
     plan: "Plan",
     planHint: "cycle plan exists",
     executor: "Executor",
@@ -123,12 +131,20 @@ const copy = {
     metrics: "📊 Metrics",
     loadMetrics: "Load metrics",
     refreshMetrics: "Refresh metrics",
+    closeMetrics: "Close metrics",
     metricsLoading: "Computing metrics…",
     elapsed: "cycle elapsed",
     thisCycle: "this cycle",
     firstPassStreak: "first-pass streak",
     cumulativeAutonomy: "autonomy total",
-    autonomyTooltip: "v1: autonomy = full cycle duration (a human did not drive it). Interventions are counted separately so you can discount them.",
+    activeAgent: "active agent",
+    unitEconomics: "unit economics",
+    requirementUnit: "requirement",
+    taskUnit: "task",
+    verificationRatio: "verify/implement",
+    testFailures: "test failures",
+    fragmentation: "fragmentation",
+    autonomyTooltip: "Hands-off time uses event-timestamped cycles only. Artifact-mtime backfills remain visible per cycle but are excluded from this total. Interventions are counted separately.",
     history: "Cycle history",
     colCycle: "cycle",
     colVerdict: "verdict",
@@ -138,6 +154,8 @@ const copy = {
     colRework: "rework",
     colInterventions: "interventions",
     colFindFix: "find→fix",
+    colSelection: "selection",
+    colTests: "tests",
     colTag: "tag",
     errorFeed: "Error feed",
     showMore: "Show more",
@@ -147,6 +165,10 @@ const copy = {
     unknownErrors: "Errors",
     firstPassRate: "first-pass rate",
     reworkTotal: "rework total",
+    selectionCoverage: "selection records",
+    averageValue: "avg value",
+    lowValueStreak: "low-value streak",
+    predictionMae: "duration MAE",
     tag_executor: "executor",
     tag_plan: "plan",
     tag_reviewer: "reviewer FP",
@@ -159,6 +181,7 @@ const copy = {
     loadSpec: "Cross-reference spec vs cycles",
     specLoading: "Parsing spec…",
     refreshSpec: "Refresh spec progress",
+    closeSpec: "Close spec progress",
     specImplemented: "implemented",
     specInProgress: "in progress",
     specStalled: "stalled",
@@ -172,6 +195,8 @@ const copy = {
     ctaEscalatedDesc: "escalated — open Claude tail",
     ctaBusy: "⏳ Working…",
     ctaBusyDesc: "open live output",
+    ctaLimited: "⚠ Usage limit",
+    ctaLimitedDesc: "open output for reset time",
     ctaPrepareNext: "🗺 Prepare next cycle",
     ctaPrepareNextDesc: "ask Codex for a plan",
     moreActions: "All actions",
@@ -209,6 +234,17 @@ const copy = {
     deploying: "Deploying…",
     deployDone: "Deployed.",
     deployFailed: "Deploy failed — see output above.",
+    subscriptionUsage: "Subscription usage",
+    usageLoading: "Loading subscription windows…",
+    usageUnavailable: "Usage unavailable",
+    claudeLogin: "Sign in to Claude",
+    claudeLoginStarting: "Starting sign-in…",
+    claudeLoginOpen: "Open sign-in page",
+    claudeLoginCode: "Paste authorization code",
+    claudeLoginSubmit: "Submit code",
+    resets: "resets",
+    extraUsage: "extra usage",
+    apiEstimate: "API-equivalent estimate",
   },
   ko: {
     refresh: "새로고침",
@@ -231,6 +267,7 @@ const copy = {
     idle: "대기",
     busy: "작업 중",
     unknown: "알 수 없음",
+    limited: "사용량 제한",
     plan: "계획 있음",
     planHint: "plan.md 확인",
     executor: "Claude 차례",
@@ -301,12 +338,20 @@ const copy = {
     metrics: "📊 지표",
     loadMetrics: "지표 불러오기",
     refreshMetrics: "지표 새로고침",
+    closeMetrics: "지표 닫기",
     metricsLoading: "지표 계산 중…",
     elapsed: "사이클 경과",
     thisCycle: "이번 사이클",
     firstPassStreak: "first-pass 연속",
     cumulativeAutonomy: "누적 자동",
-    autonomyTooltip: "v1 정의: 자동 시간 = 사이클 전체 길이(사람이 직접 조작하지 않은 시간). 개입 횟수는 따로 세어 해석에 참고하세요.",
+    activeAgent: "에이전트 활성",
+    unitEconomics: "단위 경제성",
+    requirementUnit: "요구사항",
+    taskUnit: "task",
+    verificationRatio: "검증/구현",
+    testFailures: "테스트 실패",
+    fragmentation: "분할 비용",
+    autonomyTooltip: "누적 자동 시간은 이벤트 시각이 완전한 사이클만 합산합니다. 파일 mtime 백필은 사이클별로 표시하되 누적에서 제외하며, 개입 횟수는 별도로 셉니다.",
     history: "사이클 히스토리",
     colCycle: "사이클",
     colVerdict: "판정",
@@ -316,6 +361,8 @@ const copy = {
     colRework: "재작업",
     colInterventions: "개입",
     colFindFix: "발견→수정",
+    colSelection: "선택",
+    colTests: "테스트",
     colTag: "태그",
     errorFeed: "오류 피드",
     showMore: "더보기",
@@ -325,6 +372,10 @@ const copy = {
     unknownErrors: "오류",
     firstPassRate: "first-pass 비율",
     reworkTotal: "누적 재작업",
+    selectionCoverage: "선택 기록",
+    averageValue: "평균 가치",
+    lowValueStreak: "저가치 연속",
+    predictionMae: "시간예측 오차",
     tag_executor: "실행자",
     tag_plan: "플랜",
     tag_reviewer: "리뷰어 오탐",
@@ -337,6 +388,7 @@ const copy = {
     loadSpec: "스펙 ↔ 사이클 교차 집계",
     specLoading: "스펙 파싱 중…",
     refreshSpec: "구현 현황 새로고침",
+    closeSpec: "구현 현황 닫기",
     specImplemented: "구현됨",
     specInProgress: "진행 중",
     specStalled: "중단됨",
@@ -350,6 +402,8 @@ const copy = {
     ctaEscalatedDesc: "escalated — Claude 화면 확인",
     ctaBusy: "⏳ 작업 중…",
     ctaBusyDesc: "실시간 출력 보기",
+    ctaLimited: "⚠ 사용량 제한",
+    ctaLimitedDesc: "출력에서 초기화 시간 확인",
     ctaPrepareNext: "🗺 다음 사이클 준비",
     ctaPrepareNextDesc: "Codex에게 plan 요청",
     moreActions: "전체 동작",
@@ -387,6 +441,17 @@ const copy = {
     deploying: "배포 중…",
     deployDone: "배포 완료.",
     deployFailed: "배포 실패 — 위 출력을 확인하세요.",
+    subscriptionUsage: "구독 사용량",
+    usageLoading: "구독 한도 조회 중…",
+    usageUnavailable: "사용량 조회 불가",
+    claudeLogin: "Claude 재로그인",
+    claudeLoginStarting: "로그인 시작 중…",
+    claudeLoginOpen: "로그인 페이지 열기",
+    claudeLoginCode: "인증 코드 붙여넣기",
+    claudeLoginSubmit: "코드 전송",
+    resets: "초기화",
+    extraUsage: "추가 사용량",
+    apiEstimate: "API 환산 추정치",
   },
 };
 
@@ -510,10 +575,21 @@ function isSectionCollapsed(project, title) {
 
 /* phase가 결정하는 카드당 주 액션 하나 */
 function primaryAction(p) {
+  const limitedAgent = ["claude", "codex"].find((name) => p.agents?.[name]?.usageLimit);
   const claudeBusy = p.agents?.claude?.idle === false;
   const codexBusy = p.agents?.codex?.idle === false;
   if (p.phase === "escalated") {
     return { kind: "tail", target: "claude", cls: "bad", label: t("ctaEscalated"), desc: t("ctaEscalatedDesc") };
+  }
+  if (limitedAgent) {
+    const reset = p.agents[limitedAgent].usageLimit?.resets;
+    return {
+      kind: "tail",
+      target: limitedAgent,
+      cls: "bad",
+      label: t("ctaLimited"),
+      desc: `${limitedAgent}${reset ? ` · ${reset}` : ` · ${t("ctaLimitedDesc")}`}`,
+    };
   }
   if (claudeBusy || codexBusy) {
     const target = claudeBusy ? "claude" : "codex";
@@ -552,6 +628,7 @@ function ctaRow(p) {
 }
 
 function agentState(agent) {
+  if (agent.usageLimit) return "limited";
   if (agent.idle === null) return "unknown";
   return agent.idle ? "idle" : "busy";
 }
@@ -659,6 +736,75 @@ function hhmm(iso) {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
+function formatReset(iso) {
+  if (!iso) return "-";
+  const d = new Date(iso);
+  if (isNaN(d)) return "-";
+  return new Intl.DateTimeFormat(language === "ko" ? "ko-KR" : "en-US", {
+    month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
+  }).format(d);
+}
+
+function usageWindow(window) {
+  const pct = Math.max(0, Math.min(100, Number(window.usedPercent) || 0));
+  const cls = pct >= 90 ? "bad" : pct >= 70 ? "warn" : "good";
+  return `<div class="usage-window">
+    <div class="usage-window-head"><span>${esc(window.label)}</span><strong class="usage-${cls}">${pct.toFixed(1)}%</strong></div>
+    <div class="usage-track"><span class="usage-fill ${cls}" style="width:${pct}%"></span></div>
+    <div class="muted-line">${t("resets")} ${esc(formatReset(window.resetsAt))}</div>
+  </div>`;
+}
+
+function claudeAuthControls(data) {
+  if (!data?.reauthRequired && !claudeAuth) return "";
+  const state = claudeAuth?.state || "idle";
+  const running = state === "running";
+  const message = claudeAuth?.message
+    ? `<div class="muted-line auth-message">${esc(claudeAuth.message)}</div>`
+    : "";
+  const fallbackLink = claudeAuth?.url
+    ? `<a class="btn small" href="${esc(claudeAuth.url)}" target="_blank" rel="noopener noreferrer">${t("claudeLoginOpen")}</a>`
+    : "";
+  const codeInput = running && claudeAuth?.needsCode
+    ? `<form class="claude-auth-code"><input name="code" autocomplete="one-time-code" placeholder="${t("claudeLoginCode")}" required>
+        <button class="btn small" type="submit">${t("claudeLoginSubmit")}</button></form>`
+    : "";
+  const startButton = state !== "success"
+    ? `<button class="btn small" type="button" data-action="claude-login" ${running ? "disabled" : ""}>${running ? t("claudeLoginStarting") : t("claudeLogin")}</button>`
+    : "";
+  return `<div class="claude-auth-controls">${startButton}${fallbackLink}${message}${codeInput}</div>`;
+}
+
+function renderUsage() {
+  if (!subscriptionUsage) {
+    subscriptionUsageEl.innerHTML = `<h2>${t("subscriptionUsage")}</h2><div class="muted-line">${t("usageLoading")}</div>`;
+    return;
+  }
+  const provider = (name, data) => {
+    if (!data?.available) {
+      return `<div class="usage-provider"><div class="usage-provider-head"><strong>${name}</strong></div>
+        <div class="muted-line">${t("usageUnavailable")}: ${esc(data?.error || "-")}</div>
+        ${name === "Claude" ? claudeAuthControls(data) : ""}</div>`;
+    }
+    let windows = data.windows || [];
+    let groups = "";
+    if (name === "Codex" && Array.isArray(data.limits)) {
+      groups = data.limits.map((limit) => `<div class="usage-limit-group">
+        <div class="usage-limit-name">${esc(limit.name)}${limit.plan ? ` · ${esc(limit.plan)}` : ""}</div>
+        ${(limit.windows || []).map(usageWindow).join("")}
+      </div>`).join("");
+    } else {
+      groups = windows.map(usageWindow).join("");
+    }
+    const extra = data.extraUsage
+      ? `<div class="muted-line usage-extra">${t("extraUsage")} ${Number(data.extraUsage.usedPercent).toFixed(1)}% · ${data.extraUsage.currency} ${Number(data.extraUsage.used).toFixed(2)} / ${Number(data.extraUsage.limit).toFixed(2)}</div>`
+      : "";
+    return `<div class="usage-provider"><div class="usage-provider-head"><strong>${name}</strong>${data.plan ? `<span>${esc(data.plan)}</span>` : ""}</div>${groups}${extra}</div>`;
+  };
+  subscriptionUsageEl.innerHTML = `<div class="usage-title"><h2>${t("subscriptionUsage")}</h2><span class="muted-line">${esc(formatReset(subscriptionUsage.generatedAt))}</span></div>
+    <div class="usage-grid">${provider("Claude", subscriptionUsage.claude)}${provider("Codex", subscriptionUsage.codex)}</div>`;
+}
+
 function firstPassStreak(cycles) {
   let streak = 0;
   for (let i = cycles.length - 1; i >= 0; i--) {
@@ -685,11 +831,37 @@ function metricsSummaryLine(project, m) {
   const last = cycles[cycles.length - 1] || {};
   const parts = [
     `${t("elapsed")} ${formatDuration(currentElapsedSec(project, cycles))}`,
-    `${t("thisCycle")} ${formatUsd(last.costUsd)}`,
+    `${t("thisCycle")} ${formatUsd(last.costUsd)} (Claude ${formatUsd(last.agentCostsUsd?.claude)} · Codex ${formatUsd(last.agentCostsUsd?.codex)})`,
     `${t("firstPassStreak")} ${firstPassStreak(cycles)}`,
     `${t("cumulativeAutonomy")} ${(m.totals?.autonomyHours ?? 0).toFixed(1)}h`,
   ];
-  return `<div class="metrics-summary" title="${esc(t("autonomyTooltip"))}">${parts.map(esc).join(" · ")}</div>`;
+  const selection = m.totals?.selection;
+  if (selection?.recorded) {
+    parts.push(`${t("averageValue")} ${Number(selection.averageUserValue ?? 0).toFixed(1)}/5`);
+    parts.push(`${t("lowValueStreak")} ${selection.lowValueStreak ?? 0}`);
+  }
+  return `<div class="metrics-summary" title="${esc(t("autonomyTooltip"))}">${parts.map(esc).join(" · ")} · <span class="muted-line">${t("apiEstimate")}</span></div>`;
+}
+
+function normalizedMetrics(m) {
+  const totals = m.totals || {};
+  const units = totals.units || {};
+  const execution = totals.execution || {};
+  const interventions = totals.interventions || {};
+  const reqCost = units.averageCostPerRequirementUsd;
+  const taskCost = units.averageCostPerTaskUsd;
+  const lines = execution.linesChanged || 0;
+  const coverage = `${units.coverage?.requirements ?? "-"}/${units.coverage?.tasks ?? "-"}`;
+  const interventionTitle = Object.entries(interventions.byType || {}).map(([key, value]) => `${key} ${value}`).join(" · ");
+  const fragmented = units.fragmentedRequirements || 0;
+  return `<div class="metrics-summary normalized ${fragmented ? "has-fragmentation" : ""}" title="coverage req/task ${esc(coverage)} · ${esc(interventionTitle)}">
+    ${esc(t("activeAgent"))} ${formatDuration((totals.activeAgentHours ?? 0) * 3600)} (${totals.activeAgentCycles ?? 0}) ·
+    ${esc(t("requirementUnit"))} ${units.requirementCount ?? 0} / ${formatUsd(reqCost)} / ${(units.averageCyclesPerRequirement ?? 0).toFixed(2)} cycles ·
+    ${esc(t("taskUnit"))} ${units.taskCount ?? 0} / ${formatUsd(taskCost)} ·
+    ${esc(t("verificationRatio"))} ${execution.verificationToImplementationTimeRatio ?? "-"} ·
+    ${esc(t("testFailures"))} ${execution.failedChecks ?? 0}/${execution.recordedChecks ?? 0} · Δ ${lines} lines
+    · ${esc(t("fragmentation"))} ${fragmented}/${units.amplifiedRequirements ?? 0} FR · ${formatDuration(units.repeatedCheckOverheadSec)} (${units.fragmentationCheckCoverage ?? "-"} coverage) · ${formatUsd(units.additionalCycleVerificationCostUsd)}
+  </div>`;
 }
 
 function sparkline(m) {
@@ -736,6 +908,22 @@ function failureTagCell(project, c) {
   return `<div class="tag-buttons">${buttons}</div>`;
 }
 
+function selectionCell(c) {
+  const selection = c.selection;
+  if (!selection) return "-";
+  const scores = selection.scores || {};
+  const prediction = selection.predictions || {};
+  const actual = selection.actual || {};
+  const title = [
+    selection.title || selection.chosen || "selection",
+    `score ${selection.total ?? "-"} · margin ${selection.scoreMargin ?? "-"}`,
+    `predicted ${prediction.durationMin ?? "-"}m / ${formatUsd(prediction.costUsd)}`,
+    `actual ${actual.durationMin ?? "-"}m / ${formatUsd(actual.costUsd)}`,
+    `fragmentation ${scores.fragmentationPenalty ?? "-"} · ${selection.fragmentation?.splitRationale || "bundled/no split"}`,
+  ].join(" · ");
+  return `<span class="selection-chip" title="${esc(title)}">V${scores.userValue ?? "-"} · R${scores.changeRisk ?? "-"}</span>`;
+}
+
 function historyTable(project, m) {
   const cycles = (m.cycles || []).slice().reverse();
   const expanded = metricsExpanded.has(project.id);
@@ -747,11 +935,13 @@ function historyTable(project, m) {
         <td>${c.cycle}</td>
         <td>${verdictShort(c.finalVerdict)}</td>
         <td>${c.passes}</td>
-        <td>${formatDuration(c.durationSec)}</td>
-        <td>${formatUsd(c.costUsd)}</td>
+        <td title="active ${formatDuration(c.activeAgentSec)} · impl ${formatDuration(c.phaseDurationSec?.implementation)} · verify ${formatDuration(c.phaseDurationSec?.verification)} · rework ${formatDuration(c.phaseDurationSec?.rework)} · merge ${formatDuration(c.phaseDurationSec?.merge)}">${formatDuration(c.durationSec)}</td>
+        <td title="Claude ${formatUsd(c.agentCostsUsd?.claude)} · Codex ${formatUsd(c.agentCostsUsd?.codex)} · Δ ${c.normalized?.changedLines ?? "-"} lines">${formatUsd(c.costUsd)}</td>
         <td>${formatUsd(c.reworkCostUsd)}</td>
-        <td>${c.interventions}</td>
+        <td title="${esc(Object.entries(c.intervention?.byType || {}).map(([key, value]) => `${key} ${value}`).join(" · "))}">${c.interventions}</td>
         <td>${formatDuration(c.blockedToFixSec)}</td>
+        <td title="${esc((c.checks?.failedStages || []).map((stage) => `${stage.command} (${stage.exitCode})`).join(" · "))}">${c.checks?.failed ?? 0}/${c.checks?.recorded ?? 0}</td>
+        <td>${selectionCell(c)}</td>
         <td>${tagCell}</td>
       </tr>`;
   }).join("");
@@ -768,7 +958,7 @@ function historyTable(project, m) {
           <thead><tr>
             <th>${t("colCycle")}</th><th>${t("colVerdict")}</th><th>${t("colPasses")}</th>
             <th>${t("colDuration")}</th><th>${t("colCost")}</th><th>${t("colRework")}</th>
-            <th>${t("colInterventions")}</th><th>${t("colFindFix")}</th><th>${t("colTag")}</th>
+            <th>${t("colInterventions")}</th><th>${t("colFindFix")}</th><th>${t("colTests")}</th><th>${t("colSelection")}</th><th>${t("colTag")}</th>
           </tr></thead>
           <tbody>${rows}</tbody>
         </table>
@@ -824,7 +1014,13 @@ function metaCyclePrompt(project, m) {
     `- cycles: ${tt.cycles}`,
     `- first-pass rate: ${tt.firstPassRate}`,
     `- autonomy hours: ${tt.autonomyHours}`,
-    `- cost: $${tt.costUsd} · rework: $${tt.reworkCostUsd}`,
+    `- active agent hours: ${tt.activeAgentHours} across ${tt.activeAgentCycles} measured cycles`,
+    `- cost: $${tt.costUsd} · measured rework: $${tt.reworkCostUsd} · backfilled rework: $${tt.backfilledReworkCostUsd || 0}`,
+    `- units: ${tt.units?.requirementCount || 0} requirements at $${tt.units?.averageCostPerRequirementUsd ?? "-"} avg and ${tt.units?.averageCyclesPerRequirement ?? "-"} cycles/FR · ${tt.units?.taskCount || 0} tasks at $${tt.units?.averageCostPerTaskUsd ?? "-"} avg`,
+    `- fragmentation: ${tt.units?.fragmentedRequirements || 0}/${tt.units?.amplifiedRequirements || 0} amplified FRs · repeated checks ${formatDuration(tt.units?.repeatedCheckOverheadSec)} (${tt.units?.fragmentationCheckCoverage ?? "-"} coverage) · added verification $${tt.units?.additionalCycleVerificationCostUsd || 0}`,
+    `- execution: ${tt.execution?.linesChanged || 0} changed lines · verify/implement ${tt.execution?.verificationToImplementationTimeRatio ?? "-"} · failed checks ${tt.execution?.failedChecks || 0}/${tt.execution?.recordedChecks || 0} · timed-check coverage ${tt.execution?.timedCheckCoverage ?? "-"}`,
+    `- interventions: actionable ${tt.interventions?.actionable || 0} · observations ${tt.interventions?.observations || 0} · ${Object.entries(tt.interventions?.byType || {}).map(([key, value]) => `${key} ${value}`).join(" · ")}`,
+    `- selection: ${tt.selection?.recorded || 0} recorded · avg value ${tt.selection?.averageUserValue ?? "-"} · low-value streak ${tt.selection?.lowValueStreak || 0} · duration MAE ${tt.selection?.durationPredictionMaeMin ?? "-"}m`,
     `- failure tags (last 20): ${tagLine}`,
     "",
     "Follow the template: read the signal, propose ≤3 concrete diffs (each naming",
@@ -842,20 +1038,28 @@ function specBar(percent, cls = "") {
 
 function renderSpecContent(project) {
   const entry = specCache[project.id];
-  if (!entry) {
+  if (!entry || !visibleSpecProgress.has(project.id)) {
     return `<button type="button" class="action-btn" data-action="spec" data-project="${project.id}">
       <span class="btn-title">${t("specProgress")}</span>
       <span class="btn-desc">${t("loadSpec")}</span>
     </button>`;
   }
   if (entry.loading) {
-    return `<div class="metrics-summary">${t("specLoading")}</div>`;
+    return `<div class="metrics-summary">${t("specLoading")}</div>
+      <button type="button" class="action-btn compact" data-action="spec-close" data-project="${project.id}">
+        <span class="btn-title">${t("closeSpec")}</span>
+      </button>`;
   }
   if (entry.error) {
     return `<div class="metrics-summary">${esc(entry.error)}</div>
-      <button type="button" class="action-btn compact" data-action="spec" data-project="${project.id}">
-        <span class="btn-title">${t("refreshSpec")}</span>
-      </button>`;
+      <div class="metrics-actions">
+        <button type="button" class="action-btn compact" data-action="spec" data-project="${project.id}">
+          <span class="btn-title">${t("refreshSpec")}</span>
+        </button>
+        <button type="button" class="action-btn compact" data-action="spec-close" data-project="${project.id}">
+          <span class="btn-title">${t("closeSpec")}</span>
+        </button>
+      </div>`;
   }
   const s = entry.data;
   const tt = s.totals;
@@ -891,12 +1095,18 @@ function renderSpecContent(project) {
     <div class="muted-line spec-chips">${esc(chips)}</div>
     ${s.inProgressFrs.length ? `<div class="muted-line">⏳ ${s.inProgressFrs.map(esc).join(", ")}</div>` : ""}
     <div class="spec-modules">${moduleRows}</div>
-    <button type="button" class="action-btn compact" data-action="spec" data-project="${project.id}">
-      <span class="btn-title">${t("refreshSpec")}</span>
-    </button>`;
+    <div class="metrics-actions">
+      <button type="button" class="action-btn compact" data-action="spec" data-project="${project.id}">
+        <span class="btn-title">${t("refreshSpec")}</span>
+      </button>
+      <button type="button" class="action-btn compact" data-action="spec-close" data-project="${project.id}">
+        <span class="btn-title">${t("closeSpec")}</span>
+      </button>
+    </div>`;
 }
 
 async function loadSpecProgress(projectId) {
+  visibleSpecProgress.add(projectId);
   specCache[projectId] = { loading: true };
   render();
   try {
@@ -910,28 +1120,38 @@ async function loadSpecProgress(projectId) {
 
 function renderMetricsContent(project) {
   const entry = metricsCache[project.id];
-  if (!entry) {
+  if (!entry || !visibleMetrics.has(project.id)) {
     return `<button type="button" class="action-btn" data-action="metrics" data-project="${project.id}">
       <span class="btn-title">${t("metrics")}</span>
       <span class="btn-desc">${t("loadMetrics")}</span>
     </button>`;
   }
   if (entry.loading) {
-    return `<div class="metrics-summary">${t("metricsLoading")}</div>`;
+    return `<div class="metrics-summary">${t("metricsLoading")}</div>
+      <button type="button" class="action-btn compact" data-action="metrics-close" data-project="${project.id}">
+        <span class="btn-title">${t("closeMetrics")}</span>
+      </button>`;
   }
   const m = entry.data;
   return `
     ${metaBanner(project, m)}
     ${metricsSummaryLine(project, m)}
+    ${normalizedMetrics(m)}
     ${sparkline(m)}
     ${historyTable(project, m)}
     ${errorFeed(m)}
-    <button type="button" class="action-btn compact" data-action="metrics" data-project="${project.id}">
-      <span class="btn-title">${t("refreshMetrics")}</span>
-    </button>`;
+    <div class="metrics-actions">
+      <button type="button" class="action-btn compact" data-action="metrics" data-project="${project.id}">
+        <span class="btn-title">${t("refreshMetrics")}</span>
+      </button>
+      <button type="button" class="action-btn compact" data-action="metrics-close" data-project="${project.id}">
+        <span class="btn-title">${t("closeMetrics")}</span>
+      </button>
+    </div>`;
 }
 
 function render() {
+  renderUsage();
   const visible = visibleProjects();
   if (visible.length === 0) {
     projectsEl.innerHTML = `<div class="panel">${t("noVisibleProjects")}</div>`;
@@ -1101,7 +1321,97 @@ function consoleSummary() {
   }).join("\n\n");
 }
 
+function loadSubscriptionUsage(force = false) {
+  if (usageRequest) return usageRequest;
+  const usagePath = `/api/usage${force ? "?force=1" : ""}`;
+  usageRequest = api(usagePath)
+    .then((body) => {
+      if (body?.usage) subscriptionUsage = body.usage;
+    })
+    .catch((err) => {
+      if (!subscriptionUsage) {
+        const unavailable = { available: false, error: err.message, windows: [] };
+        subscriptionUsage = {
+          generatedAt: new Date().toISOString(),
+          claude: unavailable,
+          codex: unavailable,
+        };
+      }
+    })
+    .finally(() => {
+      usageRequest = null;
+      renderUsage();
+    });
+  return usageRequest;
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function pollClaudeAuth(popup = null) {
+  let opened = false;
+  const deadline = Date.now() + 10 * 60 * 1000;
+  try {
+    while (Date.now() < deadline) {
+      const body = await api("/api/auth/claude/status");
+      claudeAuth = body.auth;
+      if (!opened && claudeAuth?.url && popup) {
+        try {
+          popup.location.replace(claudeAuth.url);
+          popup.opener = null;
+          opened = true;
+        } catch (_) {
+          // The rendered fallback link remains available if the popup was blocked.
+        }
+      }
+      renderUsage();
+      if (["success", "error"].includes(claudeAuth?.state)) {
+        if (claudeAuth.state === "success") await loadSubscriptionUsage(true);
+        return;
+      }
+      await delay(500);
+    }
+  } finally {
+    claudeAuthPoll = null;
+  }
+}
+
+async function startClaudeLogin() {
+  let popup = window.open("about:blank", "pev-claude-auth");
+  if (popup) {
+    popup.document.title = t("claudeLogin");
+    popup.document.body.textContent = t("claudeLoginStarting");
+  }
+  try {
+    const body = await api("/api/auth/claude/start", { method: "POST", body: "{}" });
+    claudeAuth = body.auth;
+    renderUsage();
+    if (!claudeAuthPoll) claudeAuthPoll = pollClaudeAuth(popup);
+  } catch (err) {
+    if (popup) popup.close();
+    throw err;
+  }
+}
+
+async function submitClaudeAuthCode(form) {
+  const input = form.elements.code;
+  const code = String(input?.value || "").trim();
+  if (!code) return;
+  const body = await api("/api/auth/claude/input", {
+    method: "POST",
+    body: JSON.stringify({ code }),
+  });
+  claudeAuth = body.auth;
+  input.value = "";
+  renderUsage();
+  if (!claudeAuthPoll) claudeAuthPoll = pollClaudeAuth();
+}
+
 async function load(options = {}) {
+  // Subscription providers can take several seconds. Start them independently
+  // so project/cycle/agent state renders as soon as /api/projects returns.
+  void loadSubscriptionUsage(Boolean(options.forceUsage));
   const body = await api("/api/projects");
   projects = body.projects;
   render();
@@ -1157,6 +1467,7 @@ async function createDone(projectId) {
 }
 
 async function loadMetrics(projectId, force = false) {
+  visibleMetrics.add(projectId);
   metricsCache[projectId] = { loading: true, data: metricsCache[projectId]?.data };
   render();
   try {
@@ -1173,11 +1484,32 @@ async function loadMetrics(projectId, force = false) {
 async function handleAction(button) {
   const project = button.dataset.project;
   if (button.dataset.action === "metrics") {
+    if (!visibleMetrics.has(project) && metricsCache[project]?.data) {
+      visibleMetrics.add(project);
+      render();
+      return;
+    }
     await loadMetrics(project, metricsCache[project] && !metricsCache[project].loading);
     return;
   }
+  if (button.dataset.action === "metrics-close") {
+    visibleMetrics.delete(project);
+    metricsExpanded.delete(project);
+    render();
+    return;
+  }
   if (button.dataset.action === "spec") {
+    if (!visibleSpecProgress.has(project) && specCache[project]?.data) {
+      visibleSpecProgress.add(project);
+      render();
+      return;
+    }
     await loadSpecProgress(project);
+    return;
+  }
+  if (button.dataset.action === "spec-close") {
+    visibleSpecProgress.delete(project);
+    render();
     return;
   }
   if (button.dataset.action === "meta-copy") {
@@ -1293,11 +1625,23 @@ quickbarEl.addEventListener("change", (event) => {
   renderQuickbar(visibleProjects());
 });
 
-refreshBtn.addEventListener("click", () => load({ forceConsole: true }).catch((err) => log(`ERROR: ${err.message}`)));
+subscriptionUsageEl.addEventListener("click", (event) => {
+  const button = event.target.closest('[data-action="claude-login"]');
+  if (!button) return;
+  startClaudeLogin().catch((err) => log(`ERROR: ${err.message}`));
+});
+subscriptionUsageEl.addEventListener("submit", (event) => {
+  if (!event.target.matches(".claude-auth-code")) return;
+  event.preventDefault();
+  submitClaudeAuthCode(event.target).catch((err) => log(`ERROR: ${err.message}`));
+});
+
+refreshBtn.addEventListener("click", () => load({ forceConsole: true, forceUsage: true }).catch((err) => log(`ERROR: ${err.message}`)));
 languageToggleBtn.addEventListener("click", () => {
   language = language === "ko" ? "en" : "ko";
   localStorage.setItem("pevLanguage", language);
   renderStaticText();
+  renderUsage();
   render();
   if (consoleEl.dataset.mode !== "manual") {
     autoLog(consoleSummary());
@@ -1465,6 +1809,7 @@ contextForm.addEventListener("submit", async (event) => {
 
 renderStaticText();
 applyTheme();
+renderUsage();
 load().catch((err) => log(`ERROR: ${err.message}`));
 setInterval(() => {
   if (document.visibilityState === "visible") load().catch(() => {});

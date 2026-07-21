@@ -21,7 +21,7 @@ If you are an agent asked to set up PEV from this README, open and follow `docs/
   - first-stop operating guide for humans, Claude, and Codex.
 - `scripts/`
   - `pev_runner.py`: agent session runner — `tmux` driver (panes) or `headless` driver (`claude -p --resume` / `codex exec resume`; session IDs persist in `logs/pev-sessions.json`, so projects stop/resume across reboots without tmux).
-  - `pevctl.py`: `init` bootstraps a project end to end — create/clone/adopt a git repo, inject artifacts, optionally tailor AGENTS.md, commit/push, register in the dashboard.
+  - `pevctl.py`: `init` bootstraps a project end to end; `import-spec` prepares a non-implementing Planner handoff from Spec Kit artifacts.
   - `ensure-pev-tmux.sh`: creates stable tmux sessions for Claude and Codex (tmux driver only).
   - `hermes-cycle-bot.py`: Telegram/Hermes bridge for `/tail`, `/say`, `/implement`, `/fix`, `/review`, `/recheck`, `/merge`, and flow commands; agent I/O goes through `pev_runner.py`.
   - `claude-auto-responder.py`: watches Claude's tmux pane for approval prompts and idle notifications.
@@ -195,11 +195,36 @@ Cycle shape:
 
 ```text
 .review/cycle-N/
+  selection.json
   plan.md
   advisor-feedback/step-NNN.md
   review-v1.md
   executor/pass-001-done.json
 ```
+
+`selection.json` records the Planner's top remaining candidates, score rubric,
+evidence and predictions before implementation. Existing projects are backward
+compatible; newly initialized projects receive the selection template and must
+provide at least two candidates before `/implement` starts.
+`includedTasks` lists every task completed by the chosen slice so cost-per-task
+does not assume one cycle equals one task. Metrics schema v3 also records agent
+turn time, typed interventions, Git diff size, requirement amplification and
+structured check failures; absent historical coverage remains `null`/unknown.
+Selection schema v2 additionally gates unjustified single-task splits within the
+same requirement and reports repeated-check time plus additional-cycle
+verification cost as fragmentation overhead.
+
+For a personal Spec Kit bridge, no extension is required:
+
+```bash
+scripts/pevctl.py import-spec --root /path/to/project --spec 001-user-auth
+```
+
+This reads `spec.md`, `plan.md` and `tasks.md`, writes an immutable source
+manifest plus a Planner request under the next `.review/cycle-N/`, and updates
+`.review/spec-index.json`. It deliberately does not invoke
+`/speckit.implement` or modify product code; send the returned `/say codex ...`
+command to create the scored `selection.json` and executable `plan.md`.
 
 Executor completion marker:
 

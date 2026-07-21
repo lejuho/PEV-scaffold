@@ -1,12 +1,96 @@
 {
   "models": {
-    "default": {
+    "claudeDefault": {
       "inputPerMTok": 3.0,
       "outputPerMTok": 15.0,
       "cacheWrite5mPerMTok": 3.75,
       "cacheWrite1hPerMTok": 6.0,
       "cacheReadPerMTok": 0.3
+    },
+    "claude-opus-4-8*": {
+      "inputPerMTok": 5.0,
+      "outputPerMTok": 25.0,
+      "cacheWrite5mPerMTok": 6.25,
+      "cacheWrite1hPerMTok": 10.0,
+      "cacheReadPerMTok": 0.5
+    },
+    "claude-opus-4-7*": {
+      "inputPerMTok": 5.0,
+      "outputPerMTok": 25.0,
+      "cacheWrite5mPerMTok": 6.25,
+      "cacheWrite1hPerMTok": 10.0,
+      "cacheReadPerMTok": 0.5
+    },
+    "claude-opus-4-6*": {
+      "inputPerMTok": 5.0,
+      "outputPerMTok": 25.0,
+      "cacheWrite5mPerMTok": 6.25,
+      "cacheWrite1hPerMTok": 10.0,
+      "cacheReadPerMTok": 0.5
+    },
+    "claude-opus-4-1*": {
+      "inputPerMTok": 15.0,
+      "outputPerMTok": 75.0,
+      "cacheWrite5mPerMTok": 18.75,
+      "cacheWrite1hPerMTok": 30.0,
+      "cacheReadPerMTok": 1.5
+    },
+    "claude-sonnet-5*": {
+      "inputPerMTok": 3.0,
+      "outputPerMTok": 15.0,
+      "cacheWrite5mPerMTok": 3.75,
+      "cacheWrite1hPerMTok": 6.0,
+      "cacheReadPerMTok": 0.3
+    },
+    "claude-sonnet-4*": {
+      "inputPerMTok": 3.0,
+      "outputPerMTok": 15.0,
+      "cacheWrite5mPerMTok": 3.75,
+      "cacheWrite1hPerMTok": 6.0,
+      "cacheReadPerMTok": 0.3
+    },
+    "claude-haiku-4*": {
+      "inputPerMTok": 1.0,
+      "outputPerMTok": 5.0,
+      "cacheWrite5mPerMTok": 1.25,
+      "cacheWrite1hPerMTok": 2.0,
+      "cacheReadPerMTok": 0.1
+    },
+    "codexDefault": {
+      "inputPerMTok": 5.0,
+      "outputPerMTok": 30.0,
+      "cacheReadPerMTok": 0.5
+    },
+    "gpt-5.6-sol*": {
+      "inputPerMTok": 5.0,
+      "outputPerMTok": 30.0,
+      "cacheReadPerMTok": 0.5
+    },
+    "gpt-5.6-terra*": {
+      "inputPerMTok": 2.5,
+      "outputPerMTok": 15.0,
+      "cacheReadPerMTok": 0.25
+    },
+    "gpt-5.6-luna*": {
+      "inputPerMTok": 1.0,
+      "outputPerMTok": 6.0,
+      "cacheReadPerMTok": 0.1
+    },
+    "gpt-5.5*": {
+      "inputPerMTok": 5.0,
+      "outputPerMTok": 30.0,
+      "cacheReadPerMTok": 0.5
+    },
+    "gpt-5.4*": {
+      "inputPerMTok": 2.5,
+      "outputPerMTok": 15.0,
+      "cacheReadPerMTok": 0.25
+    },
+    "gpt-5-codex*": {
+      "inputPerMTok": 1.25,
+      "outputPerMTok": 10.0,
+      "cacheReadPerMTok": 0.125
     }
   },
-  "note": "USD per million tokens. Values are examples — replace with the real per-model rates you are billed. Copy this file to dashboard/pricing.json (committing it is fine — no secrets). Keys under 'models' are matched against the transcript's message.model; 'default' is used when no key matches."
+  "note": "USD per million tokens, API-equivalent estimate. Updated 2026-07-16 from official OpenAI and Anthropic model pricing. Copy to pricing.json to override locally. Prefix keys ending in * match dated/internal aliases. Subscription plans are not charged these amounts."
 }

@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 2,
+  "scoreVersion": "pev-selection-v2",
+  "cycle": 0,
+  "selectedAt": "YYYY-MM-DDTHH:MM:SSZ",
+  "spec": "FR-XXX-NN",
+  "chosen": "TASK-ID",
+  "weights": {
+    "userValue": 3,
+    "dependencyUnlock": 2,
+    "codeAffinity": 1,
+    "independentVerification": 2,
+    "changeRisk": -2,
+    "testCost": -1,
+    "repetitionPenalty": -2,
+    "fragmentationPenalty": -2
+  },
+  "candidates": [
+    {
+      "task": "TASK-ID",
+      "includedTasks": ["TASK-ID"],
+      "requirement": "FR-XXX-NN",
+      "title": "Short candidate title",
+      "scores": {
+        "userValue": 1,
+        "dependencyUnlock": 1,
+        "codeAffinity": 1,
+        "independentVerification": 1,
+        "changeRisk": 1,
+        "testCost": 1,
+        "repetitionPenalty": 0,
+        "fragmentationPenalty": 0
+      },
+      "predictions": {
+        "durationMin": 60,
+        "testDurationMin": 15,
+        "costUsd": 15,
+        "firstPassProbability": 0.8,
+        "filesChanged": 6,
+        "repeatedTestDurationMin": 0,
+        "fixedVerificationCostUsd": 0
+      },
+      "fragmentation": {
+        "priorCyclesForRequirement": 0,
+        "compatibleTasksExcluded": [],
+        "repeatedChecks": [],
+        "splitRationale": "Why this boundary saves more risk than its repeated verification cost, or why compatible tasks are bundled."
+      },
+      "total": 5,
+      "confidence": 0.7,
+      "evidence": [
+        "Requirement or code evidence for this score"
+      ]
+    }
+  ],
+  "decision": "Why the chosen slice beats the alternatives."
+}

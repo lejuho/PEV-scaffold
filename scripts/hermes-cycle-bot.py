@@ -58,6 +58,9 @@ BOT_COMMANDS = [
 ]
 
 FLOW_IDLE_GRACE_SECONDS = 45
+SELECTION_TEMPLATE_SOURCE = (
+    Path(__file__).resolve().parents[1] / "templates" / "multi-agent-artifact" / "selection-template.json"
+)
 
 # Appended to merge / next-cycle prompts. Codex once found the root worktree
 # dirty and prepared the next cycle in a /tmp git worktree — Hermes only scans
@@ -67,6 +70,18 @@ WORKTREE_RULE = (
     "루트가 dirty면 잔여 변경을 `git stash push -u -m 'pre-cycle residue'`로 보존한 뒤 진행하고, "
     "마지막 응답에 stash했다고 명시하라. 다음 사이클을 준비할 때는 새 브랜치를 루트에서 checkout까지 "
     "완료하라 — .review/cycle-N이 프로젝트 루트에 보여야 Hermes가 진행한다."
+)
+SELECTION_RULE = (
+    "plan.md와 함께 `.review/cycle-N/selection.json`을 작성하라. "
+    "PEV scaffold의 최신 selection v2 템플릿 "
+    f"`{SELECTION_TEMPLATE_SOURCE}`를 읽어라. 프로젝트의 `.review/_templates/selection-template.json`이 "
+    "v2일 때만 함께 참고하고, 오래된 v1보다 scaffold v2를 우선하라. 남은 구현 후보 2~5개를 사용자 가치, "
+    "선행조건 해소, 코드 결합 이점, 독립 검증성, 변경 리스크, 예상 테스트 비용, 최근 반복 작업, "
+    "fragmentation 페널티로 비교하라. 각 후보에 근거와 예상 duration/test/cost/first-pass 및 반복 "
+    "테스트 시간·고정 검증비를 기록하라. 같은 FR의 단일 task를 택하면 함께 묶지 않은 후보와 "
+    "분리로 감소하는 리스크가 반복 검증비보다 큰 이유를 fragmentation.splitRationale에 명시하라. 가장 쉬운 "
+    "항목만 반복하지 말고 반복 패턴은 독립 검증 가능한 묶음으로 선택하라. selection은 선택 당시 "
+    "예측이므로 이후 결과에 맞춰 수정하지 마라. "
 )
 
 
@@ -289,6 +304,104 @@ def parse_plan_skills(plan_text: str) -> str | None:
     return None
 
 
+def validate_selection_artifact(root: Path, cycle: int) -> str | None:
+    """Validate selection.json only when this cycle's plan opts into it."""
+    plan = root / ".review" / f"cycle-{cycle}" / "plan.md"
+    if not re.search(r"(?m)^Selection:\s*\S+", read_text(plan)):
+        return None
+    path = root / ".review" / f"cycle-{cycle}" / "selection.json"
+    if not path.exists():
+        return f"missing {path.relative_to(root)}"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as err:
+        return f"invalid {path.relative_to(root)}: {err}"
+    if not isinstance(data, dict) or data.get("cycle") != cycle:
+        return f"selection.json cycle must be {cycle}"
+    chosen = data.get("chosen")
+    if isinstance(chosen, dict):
+        chosen = chosen.get("id")
+    candidates = data.get("candidates")
+    if not isinstance(chosen, str) or not chosen.strip():
+        return "selection.json chosen task is missing"
+    if not isinstance(candidates, list) or len(candidates) < 2:
+        return "selection.json must compare at least 2 candidates"
+    candidate_ids = {
+        row.get("task") or row.get("id")
+        for row in candidates
+        if isinstance(row, dict)
+    }
+    if chosen not in candidate_ids:
+        return "selection.json chosen task is not present in candidates"
+    if data.get("scoreVersion") == "pev-selection-v2":
+        for row in candidates:
+            if not isinstance(row, dict):
+                return "selection.json v2 candidates must be objects"
+            task_id = row.get("task") or row.get("id") or "candidate"
+            scores = row.get("scores") if isinstance(row.get("scores"), dict) else {}
+            value = scores.get("fragmentationPenalty")
+            if not isinstance(value, (int, float)) or isinstance(value, bool) or not 0 <= value <= 5:
+                return f"selection.json {task_id} fragmentationPenalty must be 0..5"
+            predictions = row.get("predictions") if isinstance(row.get("predictions"), dict) else {}
+            for key in (
+                "durationMin",
+                "testDurationMin",
+                "costUsd",
+                "firstPassProbability",
+                "filesChanged",
+                "repeatedTestDurationMin",
+                "fixedVerificationCostUsd",
+            ):
+                predicted = predictions.get(key)
+                if not isinstance(predicted, (int, float)) or isinstance(predicted, bool) or predicted < 0:
+                    return f"selection.json {task_id} prediction {key} must be >= 0"
+            probability = predictions["firstPassProbability"]
+            if probability > 1:
+                return f"selection.json {task_id} prediction firstPassProbability must be 0..1"
+        chosen_row = next(
+            (row for row in candidates if isinstance(row, dict) and (row.get("task") or row.get("id")) == chosen),
+            None,
+        )
+        if chosen_row is None:
+            return "selection.json chosen candidate is invalid"
+        included = chosen_row.get("includedTasks")
+        included_count = len([value for value in included if isinstance(value, str) and value.strip()]) if isinstance(included, list) else 1
+        requirement = chosen_row.get("requirement")
+        same_requirement_alternative = any(
+            isinstance(row, dict)
+            and (row.get("task") or row.get("id")) != chosen
+            and requirement
+            and row.get("requirement") == requirement
+            for row in candidates
+        )
+        predictions = chosen_row.get("predictions") if isinstance(chosen_row.get("predictions"), dict) else {}
+        duration = predictions.get("durationMin")
+        test_duration = predictions.get("testDurationMin")
+        cost = predictions.get("costUsd")
+        fixed_verification_cost = predictions.get("fixedVerificationCostUsd")
+        high_test_overhead = (
+            isinstance(duration, (int, float))
+            and not isinstance(duration, bool)
+            and duration > 0
+            and isinstance(test_duration, (int, float))
+            and not isinstance(test_duration, bool)
+            and test_duration / duration >= 0.35
+        ) or (
+            isinstance(cost, (int, float))
+            and not isinstance(cost, bool)
+            and cost > 0
+            and isinstance(fixed_verification_cost, (int, float))
+            and not isinstance(fixed_verification_cost, bool)
+            and fixed_verification_cost / cost >= 0.25
+        )
+        if included_count <= 1 and (same_requirement_alternative or high_test_overhead):
+            fragmentation = chosen_row.get("fragmentation") if isinstance(chosen_row.get("fragmentation"), dict) else {}
+            rationale = fragmentation.get("splitRationale")
+            if not isinstance(rationale, str) or len(rationale.strip()) < 20:
+                return "single-task or test-heavy cycle needs fragmentation.splitRationale"
+    return None
+
+
 def latest_review_file(cycle_dir: Path) -> Path | None:
     reviews: list[tuple[int, Path]] = []
     for path in cycle_dir.glob("review-v*.md"):
@@ -345,8 +458,9 @@ def executor_done_instruction(cycle: int, pass_no: int, kind: str, review: str |
         f'  "review": {json.dumps(review, ensure_ascii=False)},',
         '  "createdAt": "<UTC ISO timestamp>",',
         '  "summary": "<short summary>",',
-        '  "checks": ["<commands run>"]',
+        '  "checks": [{"command":"<command>","durationSec":<seconds>,"exitCode":0}]',
         "}",
+        "checks에는 실행한 각 자동 체크의 실제 wall-clock 초와 exit code를 기록하라.",
         "이 done 파일은 Hermes가 Codex 검증/재검증으로 넘어가는 트리거다.",
         f"마지막 응답에는 완료 마커 {marker}를 한 줄로 포함하라.",
         ".claude Stop hook이 이 마커를 보고 done 파일 누락을 보완한다."
@@ -876,6 +990,11 @@ def agent_idle(cfg: Config, agent: str) -> bool:
     return bool(get_runner(cfg).idle(agent))
 
 
+def agent_usage_limit(cfg: Config, agent: str) -> dict[str, str] | None:
+    limit = get_runner(cfg).status(agent).get("usageLimit")
+    return limit if isinstance(limit, dict) else None
+
+
 def agent_alive(cfg: Config, agent: str) -> bool | None:
     """True/False for tmux (session exists?), None for headless (n/a)."""
     try:
@@ -982,10 +1101,16 @@ def log_flow_send(cfg: Config, agent: str, text: str, key: str, reply: str) -> N
     up there too."""
     log_event(cfg, "flow_action", {
         "agent": agent,
+        "cycle": _cycle_from_action_key(key),
         "key": key,
         "text": text.strip().splitlines()[0][:80] if text.strip() else "",
         "delivered": paste_delivered(reply),
     })
+
+
+def _cycle_from_action_key(key: str) -> int | None:
+    match = re.match(r"cycle-(\d+):", key)
+    return int(match.group(1)) if match else None
 
 
 def paste_delivered(reply: str) -> bool:
@@ -1102,6 +1227,28 @@ def maybe_advance_flow(cfg: Config, state: CycleState, force: bool = False) -> s
         save_flow_state(cfg, flow)
         return ready_msg
 
+    for limited_agent in ("claude", "codex"):
+        usage_limit = agent_usage_limit(cfg, limited_agent)
+        if not usage_limit:
+            continue
+        reset_hint = usage_limit.get("resets") or "reset time unknown"
+        notice_key = f"usage-limit:{limited_agent}:{usage_limit.get('message', '')}"
+        send_flow_notice(
+            cfg,
+            flow,
+            notice_key,
+            f"Flow paused: {limited_agent.title()} usage limit detected; resets {reset_hint}.",
+        )
+        flow["usage_limit"] = {
+            "agent": limited_agent,
+            "detectedAt": utc_now(),
+            **usage_limit,
+        }
+        save_flow_state(cfg, flow)
+        return f"Flow paused: {limited_agent} usage limit detected; resets {reset_hint}."
+
+    flow.pop("usage_limit", None)
+
     claude_idle = agent_idle(cfg, "claude")
     codex_idle = agent_idle(cfg, "codex")
     waiting_for = flow.get("waiting_for")
@@ -1168,12 +1315,12 @@ def maybe_advance_flow(cfg: Config, state: CycleState, force: bool = False) -> s
         return None
 
     if waiting_for == "codex_review":
-        if not codex_idle:
-            flow["saw_busy"] = True
-            save_flow_state(cfg, flow)
-            return None
         baseline_review = flow.get("waiting_for_review_from")
         if state.latest_review == baseline_review:
+            if not codex_idle:
+                flow["saw_busy"] = True
+                save_flow_state(cfg, flow)
+                return None
             send_flow_notice(cfg, flow, f"cycle-{state.cycle}:codex-review:file-wait", "Flow waiting: Codex review file/state change.")
             save_flow_state(cfg, flow)
             return None
@@ -1301,7 +1448,7 @@ def maybe_advance_flow(cfg: Config, state: CycleState, force: bool = False) -> s
             return None
         prompt = ("남은 구현 스펙을 판단하고, 가장 적합한 다음 스펙 하나를 추천한 뒤 그 스펙으로 바로 사이클 준비하라. "
                   "plan.md 머리에 `Spec: FR-XXX-NN` 줄로 이번 사이클이 구현하는 스펙 ID를 명시하라. "
-                  + WORKTREE_RULE)
+                  + SELECTION_RULE + WORKTREE_RULE)
         reply = paste_to_pane(cfg, "codex", prompt, "Codex")
         mark_flow_action(flow, key, "codex_next_cycle")
         log_flow_send(cfg, "codex", prompt, key, reply)
@@ -1371,6 +1518,33 @@ def command_title(text: str) -> str:
     return labels.get(command, f"{parts[0]} 처리 중")
 
 
+def classify_intervention(command: str) -> str:
+    parts = command.strip().lower().split()
+    base = parts[0] if parts else ""
+    if base in {"/status", "/cycle", "/tail", "/help", "/start", "/menu", "/remaining"}:
+        return "observation"
+    if base == "/say":
+        return "guidance"
+    if base in {"/fix", "/recheck"}:
+        return "retry"
+    if base == "/merge":
+        return "manual_merge"
+    if base in {"/enter", "/approve-ui", "/hold", "/resume"}:
+        return "override"
+    if base in {"/implement", "/review", "/prepare_next", "/prepare-next"}:
+        return "manual_progress"
+    if base == "/flow":
+        mode = parts[1] if len(parts) > 1 else "status"
+        if mode in {"safe", "on", "full"}:
+            return "flow_start"
+        if mode in {"status", "state"}:
+            return "observation"
+        if mode == "reset":
+            return "override"
+        return "flow_control"
+    return "other"
+
+
 def help_text(state: CycleState) -> str:
     merge_line = "available" if state.phase == "ready_to_merge" else f"blocked now: phase={state.phase}"
     return (
@@ -1426,6 +1600,9 @@ def build_implement_prompt(cfg: Config, state: CycleState) -> tuple[str | None, 
     plan_text = read_text(plan_path)
     if not plan_text:
         return None, f"Refused: missing .review/cycle-{state.cycle}/plan.md"
+    selection_error = validate_selection_artifact(cfg.root, state.cycle)
+    if selection_error:
+        return None, f"Refused: {selection_error}"
 
     branch = state.branch_expected or parse_plan_branch(plan_text)
     if not branch:
@@ -1493,7 +1670,7 @@ def handle_command(cfg: Config, text: str, state: CycleState) -> str:
     if command == "/remaining":
         return paste_to_pane(cfg, "codex", "남은 구현 스펙", "Codex")
     if command == "/prepare_next":
-        reply = paste_to_pane(cfg, "codex", "그것으로 사이클 준비", "Codex")
+        reply = paste_to_pane(cfg, "codex", "그것으로 사이클 준비. " + SELECTION_RULE + WORKTREE_RULE, "Codex")
         if state.cycle is not None and paste_delivered(reply):
             stamp_manual_action(cfg, f"cycle-{state.cycle}:next_cycle", "codex_next_cycle")
         return reply
@@ -1592,8 +1769,21 @@ def process_callback(cfg: Config, callback: dict[str, Any], state: CycleState) -
     if callback_id:
         answer_callback(cfg, callback_id, title)
     send_telegram(cfg, f"{title}...")
+    started = time.monotonic()
     reply = handle_command(cfg, data, state)
-    log_event(cfg, "telegram_callback", {"data": data, "reply": reply[:500]})
+    duration_ms = int((time.monotonic() - started) * 1000)
+    log_event(
+        cfg,
+        "telegram_callback",
+        {
+            "cycle": state.cycle,
+            "origin": "telegram",
+            "intervention_type": classify_intervention(data),
+            "duration_ms": duration_ms,
+            "data": data,
+            "reply": reply[:500],
+        },
+    )
     if reply:
         send_telegram(cfg, reply)
 
@@ -1607,8 +1797,21 @@ def process_message(cfg: Config, message: dict[str, Any], state: CycleState) -> 
     if cfg.chat_id and chat_id != cfg.chat_id:
         log_event(cfg, "telegram_ignored_chat", {"chat_id": chat_id})
         return
+    started = time.monotonic()
     reply = handle_command(cfg, text, state)
-    log_event(cfg, "telegram_command", {"text": text, "reply": reply[:500]})
+    duration_ms = int((time.monotonic() - started) * 1000)
+    log_event(
+        cfg,
+        "telegram_command",
+        {
+            "cycle": state.cycle,
+            "origin": "telegram",
+            "intervention_type": classify_intervention(text),
+            "duration_ms": duration_ms,
+            "text": text,
+            "reply": reply[:500],
+        },
+    )
     if reply:
         send_telegram(cfg, reply)
 
@@ -1678,14 +1881,46 @@ def record_metric_events(cfg: Config, state: CycleState) -> None:
         keys = {}
     now = utc_now()
     changed = False
+    cycle_dir = cfg.root / ".review" / f"cycle-{state.cycle}"
 
     started_key = f"cycle_started:{state.cycle}"
     if started_key not in keys:
-        log_event(cfg, "cycle_started", {"cycle": state.cycle})
+        log_event(
+            cfg,
+            "cycle_started",
+            {"cycle": state.cycle, "pev_version": os.environ.get("PEV_SCAFFOLD_REV")},
+        )
         keys[started_key] = now
         changed = True
 
-    cycle_dir = cfg.root / ".review" / f"cycle-{state.cycle}"
+    selection_path = cycle_dir / "selection.json"
+    if selection_path.exists():
+        try:
+            selection = json.loads(selection_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            selection = None
+        if isinstance(selection, dict):
+            chosen = selection.get("chosen")
+            if isinstance(chosen, dict):
+                chosen = chosen.get("id")
+            candidates = selection.get("candidates")
+            candidate_count = len(candidates) if isinstance(candidates, list) else 0
+            selection_key = f"cycle_selected:{state.cycle}:{selection.get('selectedAt')}:{chosen}"
+            if selection_key not in keys:
+                log_event(
+                    cfg,
+                    "cycle_selected",
+                    {
+                        "cycle": state.cycle,
+                        "path": str(selection_path.relative_to(cfg.root)),
+                        "chosen": chosen,
+                        "score_version": selection.get("scoreVersion"),
+                        "candidate_count": candidate_count,
+                    },
+                )
+                keys[selection_key] = now
+                changed = True
+
     for path, rel, pass_no in iter_done_files(cycle_dir, cfg.root):
         done_key = f"pass_done:{rel}"
         if done_key in keys:

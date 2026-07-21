@@ -37,6 +37,32 @@ from typing import Any
 AGENTS = ("claude", "codex")
 SESSIONS_FILE = "pev-sessions.json"
 TURN_DIR = "pev-turns"
+TURN_STATE_FILE = "pev-agent-turns.json"
+
+USAGE_LIMIT_RE = re.compile(
+    r"(?i)(?:you(?:'|’)ve\s+hit\s+your\s+(?:session|usage)\s+limit"
+    r"|(?:session|usage)\s+limit[^\n]*(?:reset|resets))"
+)
+
+
+def detect_usage_limit(text: str) -> dict[str, str] | None:
+    """Return the latest CLI usage-limit message from a live output tail.
+
+    Limit screens usually leave the normal prompt visible and the process exits
+    successfully, so exit status and idle detection cannot distinguish them
+    from a completed turn. Keep this deliberately narrow to avoid matching
+    ordinary discussion of limits in agent output.
+    """
+    matches = list(USAGE_LIMIT_RE.finditer(text or ""))
+    if not matches:
+        return None
+    line = (text[matches[-1].start():].splitlines() or [""])[0].strip()
+    reset = re.search(r"(?i)\bresets?\s+(.+)$", line)
+    return {
+        "kind": "usage_limit",
+        "message": line[:300],
+        "resets": reset.group(1).strip()[:120] if reset else "",
+    }
 
 
 def utc_now() -> str:
@@ -221,6 +247,156 @@ class SessionStore:
         return entry if isinstance(entry, dict) else {}
 
 
+class TurnTracker:
+    """Persist agent turn boundaries as project events.
+
+    Headless turns finish from process state. Interactive tmux turns finish
+    after the runner has observed a busy state followed by idle; a grace
+    fallback covers very short turns that complete between polls.
+    """
+
+    def __init__(self, cfg: RunnerConfig):
+        self.cfg = cfg
+        self.path = cfg.resolved_log_dir() / TURN_STATE_FILE
+        self.lock_path = self.path.with_suffix(".lock")
+        self.events_path = cfg.resolved_log_dir() / "hermes-events.jsonl"
+
+    def _load(self) -> dict[str, Any]:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _mutate(self, callback) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.lock_path.open("w", encoding="utf-8") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            data = self._load()
+            callback(data)
+            tmp = self.path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            os.replace(tmp, self.path)
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+    def _event(self, event: str, payload: dict[str, Any], ts: str | None = None) -> None:
+        self.events_path.parent.mkdir(parents=True, exist_ok=True)
+        record = {"ts": ts or utc_now(), "event": event, **payload}
+        with self.events_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def start(self, agent: str, prompt: str, source: str, started_at: str | None = None) -> None:
+        now = started_at or utc_now()
+        turn_id = str(uuid.uuid4())
+        cycle = latest_cycle_number(self.cfg.root)
+
+        def update(data: dict[str, Any]) -> None:
+            previous = data.get(agent)
+            if isinstance(previous, dict) and previous.get("status") == "running":
+                self._finish_record(data, agent, previous, now, "superseded")
+            row = {
+                "turnId": turn_id,
+                "agent": agent,
+                "cycle": cycle,
+                "action": classify_turn_action(prompt),
+                "source": source,
+                "startedAt": now,
+                "status": "running",
+                "sawBusy": source == "headless",
+            }
+            data[agent] = row
+            self._event("agent_turn_started", row)
+
+        self._mutate(update)
+
+    def observe(self, agent: str, idle: bool | None, ended_at: str | None = None) -> None:
+        if idle is None:
+            return
+        now = ended_at or utc_now()
+
+        def update(data: dict[str, Any]) -> None:
+            row = data.get(agent)
+            if not isinstance(row, dict) or row.get("status") != "running":
+                return
+            if idle is False:
+                row["sawBusy"] = True
+                return
+            started = parse_iso_epoch(row.get("startedAt"))
+            elapsed = max(0.0, time.time() - started) if started is not None else 0.0
+            if row.get("sawBusy") or elapsed >= FLOW_TURN_GRACE_SECONDS or ended_at:
+                self._finish_record(data, agent, row, now, "completed")
+
+        self._mutate(update)
+
+    def stop(self, agent: str) -> None:
+        now = utc_now()
+
+        def update(data: dict[str, Any]) -> None:
+            row = data.get(agent)
+            if isinstance(row, dict) and row.get("status") == "running":
+                self._finish_record(data, agent, row, now, "stopped")
+
+        self._mutate(update)
+
+    def _finish_record(
+        self, data: dict[str, Any], agent: str, row: dict[str, Any], ended_at: str, outcome: str
+    ) -> None:
+        started = parse_iso_epoch(row.get("startedAt"))
+        ended = parse_iso_epoch(ended_at)
+        duration = int(max(0, ended - started)) if started is not None and ended is not None else None
+        row.update({"status": "idle", "endedAt": ended_at, "outcome": outcome, "durationSec": duration})
+        data[agent] = row
+        self._event(
+            "agent_turn_finished",
+            {
+                "turnId": row.get("turnId"),
+                "agent": agent,
+                "cycle": row.get("cycle"),
+                "action": row.get("action"),
+                "source": row.get("source"),
+                "started_at": row.get("startedAt"),
+                "outcome": outcome,
+                "duration_sec": duration,
+            },
+            ts=ended_at,
+        )
+
+
+FLOW_TURN_GRACE_SECONDS = 45
+
+
+def parse_iso_epoch(value: Any) -> float | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def latest_cycle_number(root: Path) -> int | None:
+    review = root / ".review"
+    if not review.exists():
+        return None
+    values = [int(match.group(1)) for child in review.iterdir() if (match := re.fullmatch(r"cycle-(\d+)", child.name))]
+    return max(values) if values else None
+
+
+def classify_turn_action(prompt: str) -> str:
+    text = prompt.lower()
+    if "머지하라" in prompt or "merge" in text:
+        return "merge"
+    if "findings" in text or "수정하고 resolved" in text:
+        return "fix"
+    if "재검증" in prompt or "구현 검증" in prompt or "review" in text:
+        return "review"
+    if "사이클 준비" in prompt or "selection.json" in text:
+        return "plan"
+    if "executor 시작" in prompt or "구현하라" in prompt or "implement" in text:
+        return "implement"
+    return "other"
+
+
 # ---------------------------------------------------------------------------
 # Session harvesting (adopt sessions created outside the runner, e.g. tmux)
 
@@ -296,6 +472,7 @@ CLAUDE_BUSY_RE = re.compile(
 # Busy detection reads the live status area only. Scanning the whole capture
 # would let a previous turn's chrome, still sitting in scrollback, read as busy.
 CLAUDE_STATUS_LINES = 20
+CODEX_STATUS_LINES = 12
 
 
 class TmuxDriver:
@@ -441,10 +618,14 @@ class TmuxDriver:
             return None
         tail = text[-2500:]
         if agent == "codex":
-            working = ["Running", "Working", "thinking", "Thinking", "exec_command", "apply_patch", "Waiting for"]
-            if any(marker in tail for marker in working):
+            # Search only the live footer. Old final-answer prose often contains
+            # words such as "working tree" and made a completed turn look busy
+            # forever when the whole 2.5KB tail was scanned.
+            status = "\n".join(tail.splitlines()[-CODEX_STATUS_LINES:])
+            busy = re.compile(r"(?im)^\s*(?:[•●◦]\s*)?(?:running|working|thinking|waiting for)\b")
+            if busy.search(status):
                 return False
-            return bool(re.search(r"(?m)^›\s", tail))
+            return bool(re.search(r"(?m)^\s*›(?:\s|$)", status))
         # Claude Code draws its spinner ABOVE the input box, so a window starting
         # at the last "❯" sees only the always-present empty prompt and reads as
         # idle no matter what the agent is doing. Read the status area instead.
@@ -507,7 +688,16 @@ class TmuxDriver:
         alive = (bool(session)
                  and self._run(["tmux", "has-session", "-t", session]).returncode == 0
                  and self._cli_running(agent))
-        return {"driver": "tmux", "pane": pane, "session": session, "alive": alive, "idle": self.idle(agent)}
+        tail = self.tail(agent, 40)
+        live_status = "\n".join(tail[-2500:].splitlines()[-CLAUDE_STATUS_LINES:])
+        return {
+            "driver": "tmux",
+            "pane": pane,
+            "session": session,
+            "alive": alive,
+            "idle": self.idle(agent),
+            "usageLimit": detect_usage_limit(live_status),
+        }
 
 
 class HeadlessDriver:
@@ -700,6 +890,7 @@ class HeadlessDriver:
 
     def status(self, agent: str) -> dict[str, Any]:
         entry = self._refresh(agent)
+        tail = self.tail(agent, 40)
         return {
             "driver": "headless",
             "sessionId": entry.get("sessionId"),
@@ -709,6 +900,8 @@ class HeadlessDriver:
             "log": entry.get("log"),
             "idle": entry.get("status") != "running" if entry else None,
             "lastTurnAt": entry.get("lastTurnAt"),
+            "lastTurnEndedAt": entry.get("lastTurnEndedAt"),
+            "usageLimit": detect_usage_limit(tail),
         }
 
 
@@ -813,18 +1006,35 @@ class AgentRunner:
     def __init__(self, cfg: RunnerConfig):
         self.cfg = cfg
         self.driver = HeadlessDriver(cfg) if cfg.driver == "headless" else TmuxDriver(cfg)
+        self.turns = TurnTracker(cfg)
 
     def send(self, agent: str, text: str) -> str:
-        return self.driver.send(agent, text)
+        result = self.driver.send(agent, text)
+        if "submitted" in result or re.search(r"turn \d+ started", result):
+            started_at = (
+                self.driver.store.get(agent).get("lastTurnAt")
+                if isinstance(self.driver, HeadlessDriver)
+                else None
+            )
+            self.turns.start(agent, text, self.cfg.driver, started_at)
+        return result
 
     def press_enter(self, agent: str, delay: bool = True) -> str:
-        return self.driver.press_enter(agent, delay)
+        result = self.driver.press_enter(agent, delay)
+        if "submitted" in result:
+            self.turns.start(agent, "manual buffered input", self.cfg.driver)
+        return result
 
     def tail(self, agent: str, lines: int = 80) -> str:
         return self.driver.tail(agent, lines)
 
     def idle(self, agent: str) -> bool | None:
-        return self.driver.idle(agent)
+        idle = self.driver.idle(agent)
+        ended_at = None
+        if self.cfg.driver == "headless":
+            ended_at = self.driver.status(agent).get("lastTurnEndedAt")
+        self.turns.observe(agent, idle, ended_at)
+        return idle
 
     def alive(self, agent: str) -> bool | None:
         """True/False for the tmux driver (session exists?). None for headless,
@@ -835,13 +1045,17 @@ class AgentRunner:
         return self.driver.start(agent)
 
     def stop(self, agent: str) -> str:
-        return self.driver.stop(agent)
+        result = self.driver.stop(agent)
+        self.turns.stop(agent)
+        return result
 
     def session_exists(self, agent: str) -> bool:
         return self.driver.session_exists(agent)
 
     def status(self, agent: str) -> dict[str, Any]:
-        return self.driver.status(agent)
+        result = self.driver.status(agent)
+        self.turns.observe(agent, result.get("idle"), result.get("lastTurnEndedAt"))
+        return result
 
     def harvest(self) -> dict[str, str | None]:
         """Adopt latest on-disk sessions for both agents into the store."""

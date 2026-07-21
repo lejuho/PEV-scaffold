@@ -15,10 +15,35 @@ Skills: none
 - cycles measured: `[totals.cycles]`
 - first-pass rate: `[totals.firstPassRate]`
 - autonomy hours: `[totals.autonomyHours]`
-- cost: `$[totals.costUsd]`  ·  rework cost: `$[totals.reworkCostUsd]`
+- active agent hours: `[totals.activeAgentHours]` across
+  `[totals.activeAgentCycles]` covered cycles
+- cost: `$[totals.costUsd]`  · measured rework cost: `$[totals.reworkCostUsd]`
+  · backfilled rework estimate: `$[totals.backfilledReworkCostUsd]`
 - failure-tag distribution (last ~20 cycles): executor `[n]` · plan `[n]` ·
   reviewer-FP `[n]` · infra `[n]`
 - recent trend (from the dashboard sparkline / history table): `[1–2 sentences]`
+- selection records: `[totals.selection.recorded]` · average user value:
+  `[totals.selection.averageUserValue]` · low-value streak:
+  `[totals.selection.lowValueStreak]`
+- prediction calibration: duration MAE `[totals.selection.durationPredictionMaeMin]m` ·
+  cost MAE `$[totals.selection.costPredictionMaeUsd]` · first-pass Brier
+  `[totals.selection.firstPassBrierScore]`
+- unit economics: requirements `[totals.units.requirementCount]` at
+  `$[totals.units.averageCostPerRequirementUsd]` and
+  `[totals.units.averageCyclesPerRequirement]` cycles/FR · tasks
+  `[totals.units.taskCount]` at `$[totals.units.averageCostPerTaskUsd]`
+- execution: changed lines `[totals.execution.linesChanged]` · verify/implement
+  time ratio `[totals.execution.verificationToImplementationTimeRatio]` · failed
+  checks `[totals.execution.failedChecks]/[totals.execution.recordedChecks]`
+- fragmentation: amplified FRs `[totals.units.amplifiedRequirements]` · fragmented
+  FRs `[totals.units.fragmentedRequirements]` · repeated check overhead
+  `[totals.units.repeatedCheckOverheadSec]s` · additional-cycle verification cost
+  `$[totals.units.additionalCycleVerificationCostUsd]` · timed-check coverage
+  `[totals.units.fragmentationCheckCoverage]`
+- split discipline: single-task selections `[totals.selection.singleTaskSelections]` ·
+  documented rationale coverage `[totals.selection.splitRationaleCoverage]`
+- interventions: actionable `[totals.interventions.actionable]` · observations
+  `[totals.interventions.observations]` · by type `[totals.interventions.byType]`
 
 ## 1. Read the signal
 
@@ -34,6 +59,17 @@ Answer from the data, not from vibes:
    the executor.
 4. **Infra noise.** If the error feed is dominated by infra clusters, that is an
    environment problem, not a PEV-logic problem — do not "fix" it in AGENTS.md.
+5. **Selection quality.** If low-value work repeats, adjust candidate grouping or
+   the rubric before changing agents. If prediction errors are high, improve the
+   score anchors/evidence; do not rewrite historical selection records.
+6. **Cycle amplification.** Inspect requirements with more than one cycle. Decide
+   whether the split removed risk or merely created coordination and review cost.
+7. **Verification efficiency.** Compare verify/implement time, failed stages and
+   verification cost per changed line. A large ratio is only actionable when
+   check coverage is present; missing check/turn records are not zeros.
+8. **Fragmentation economics.** For an amplified FR, compare risk actually removed
+   by the boundary against repeated-check overhead and additional-cycle verification
+   cost. Merge compatible tasks when the latter is larger.
 
 ## 2. Propose concrete changes
 

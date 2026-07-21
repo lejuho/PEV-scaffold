@@ -228,6 +228,7 @@ status.txt = escalated → 자동 진행 정지
 ```
 .review/cycle-N/
 ├── plan.md                    ← Planner 작성, immutable
+├── selection.json             ← 후보 점수·예측·선택 이유, immutable
 ├── review-v1.md               ← Codex review 본문 + 끝에 Executor의 RESOLVED 섹션
 ├── review-v2.md               ← 다음 pass의 review + RESOLVED
 ├── ...

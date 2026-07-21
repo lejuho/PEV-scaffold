@@ -236,9 +236,20 @@ systemctl --user enable --now pev-dashboard.service
 1. Create a cycle plan as Codex Planner:
 
    ```text
-   Write .review/cycle-N/plan.md from .review/_templates/plan-template.md.
-   Include Branch and Skills lines.
+   Write .review/cycle-N/selection.json from the selection template, comparing
+   the top 2–5 remaining candidates. Then write plan.md for the chosen slice.
+   Include Branch, Spec, Skills, and Selection lines.
    ```
+
+   If the project uses Spec Kit, prepare the same handoff without an extension:
+
+   ```bash
+   scripts/pevctl.py import-spec --root /path/to/project --spec 001-feature
+   ```
+
+   Run the `/say codex ...` command printed by `import-spec`. The bridge only
+   parses and indexes the upstream artifacts; Codex still chooses and scores
+   the cycle slice, and `/speckit.implement` remains outside the PEV flow.
 
 2. Start flow:
 
@@ -305,6 +316,7 @@ systemctl --user enable --now pev-dashboard.service
 Planner output:
 
 ```text
+.review/cycle-N/selection.json
 .review/cycle-N/plan.md
 ```
 

@@ -22,6 +22,10 @@ Skills: <skill1, skill2 | none>
 <!-- 이번 cycle이 로드해야 할 도메인 skill. 코드 변경이 있으면 필수.
      해당 도메인 skill이 없으면 "none". advisor는 자동이라 적지 않아도 됨.
      check-skill-loaded.sh가 선언 ↔ 실제 로드를 검증한다. -->
+Selection: .review/cycle-<N>/selection.json
+<!-- Planner는 plan.md와 함께 selection.json을 작성한다. 남은 구현 후보 2~5개를
+     동일한 scoreVersion으로 비교하고, 선택 당시 예측과 근거를 immutable하게 남긴다.
+     같은 FR의 단일 task slice는 반복 검증비보다 큰 리스크 감소 근거가 필수다. -->
 
 
 ## Summary
