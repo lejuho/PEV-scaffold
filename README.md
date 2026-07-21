@@ -81,6 +81,82 @@ systemctl --user enable --now claude-auto-responder.service
 systemctl --user enable --now pev-dashboard.service
 ```
 
+### Install Spec Kit on a new host
+
+PEV uses Spec Kit only for the upstream specification workflow. Spec Kit defines
+the feature and task graph; PEV still owns cycle selection, Claude execution,
+Codex verification, fixes and merge. A Spec Kit extension is not required.
+
+Install the official CLI from a pinned GitHub release. The version below is the
+release tested with this scaffold; update it deliberately after checking the
+upstream release notes.
+
+```bash
+command -v uv
+uv tool install specify-cli \
+  --from git+https://github.com/github/spec-kit.git@v0.13.0
+specify version
+```
+
+Initialize each target project with the Codex skills integration. Do this while
+PEV flow is stopped or between cycles: the PEV merge prompt preserves an
+unexpected dirty worktree in a stash, including newly generated untracked files.
+
+```bash
+cd /path/to/project
+specify init --here --force \
+  --integration codex \
+  --integration-options=--skills \
+  --script sh \
+  --ignore-agent-tools
+```
+
+The expected project additions are `.specify/` and
+`.agents/skills/speckit-*`. Review and commit only those paths; do not stage
+unrelated project changes.
+
+Replace Spec Kit's blank constitution with the PEV role boundary:
+
+```bash
+cp /path/to/PEV-scaffold/templates/spec-kit/constitution.md \
+  .specify/memory/constitution.md
+```
+
+```bash
+git status --short
+git add .specify .agents/skills/speckit-*
+git commit -m "chore: initialize Spec Kit for Codex planning"
+```
+
+After restarting Codex in the project root, the skills are available as
+`$speckit-constitution`, `$speckit-specify`, `$speckit-clarify`,
+`$speckit-plan`, `$speckit-tasks` and `$speckit-analyze`. Do not use
+`$speckit-implement` in a PEV project: it bypasses the
+Planner → Executor → Verifier contract.
+
+Once `specs/<feature>/spec.md`, `plan.md` and `tasks.md` exist, hand the next
+slice to PEV:
+
+```bash
+cd /path/to/PEV-scaffold
+scripts/pevctl.py import-spec \
+  --root /path/to/project \
+  --spec 001-feature-name
+```
+
+Send the `/say codex ...` command printed by `import-spec`. Codex creates the
+scored selection v2 and cycle plan; normal PEV `/implement` begins only after
+the fragmentation and selection gates pass.
+
+Host/project checks:
+
+```bash
+specify version
+specify self check
+test -f /path/to/project/.specify/integration.json
+test -f /path/to/project/.agents/skills/speckit-specify/SKILL.md
+```
+
 ## Tmux Model
 
 `pev-tmux.service` runs:
